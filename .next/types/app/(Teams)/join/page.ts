@@ -1,4 +1,4 @@
-// File: E:\Business\up4work\VIVID\app\(Teams)\join\page.tsx
+// File: E:\Business\up4work\APL-Auction\app\(Teams)\join\page.tsx
 import * as entry from '../../../../../app/(Teams)/join/page.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

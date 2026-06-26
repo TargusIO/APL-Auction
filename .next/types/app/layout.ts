@@ -1,4 +1,4 @@
-// File: E:\Business\up4work\VIVID\app\layout.tsx
+// File: E:\Business\up4work\APL-Auction\app\layout.tsx
 import * as entry from '../../../app/layout.js'
 import type { ResolvingMetadata, ResolvingViewport } from 'next/dist/lib/metadata/types/metadata-interface.js'
 

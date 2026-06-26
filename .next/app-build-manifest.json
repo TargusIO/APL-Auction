@@ -6,41 +6,6 @@
       "static/css/app/layout.css",
       "static/chunks/app/layout.js"
     ],
-    "/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/page.js"
-    ],
-    "/(Teams)/squad/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(Teams)/squad/page.js"
-    ],
-    "/(Teams)/history/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(Teams)/history/page.js"
-    ],
-    "/(Teams)/bid/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(Teams)/bid/page.js"
-    ],
-    "/(Teams)/budget/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/(Teams)/budget/page.js"
-    ],
-    "/auctioneer/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/auctioneer/page.js"
-    ],
-    "/screen/page": [
-      "static/chunks/webpack.js",
-      "static/chunks/main-app.js",
-      "static/chunks/app/screen/page.js"
-    ],
     "/(Teams)/join/page": [
       "static/chunks/webpack.js",
       "static/chunks/main-app.js",

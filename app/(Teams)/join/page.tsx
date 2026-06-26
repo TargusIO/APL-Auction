@@ -140,31 +140,33 @@ export default function JoinPage() {
 
         {/* ══ STEP 2: PIN Entry ══ */}
         {step === "pin" && (
-          <div className="anim-in flex-1 flex flex-col min-h-0 overflow-hidden px-4 pt-6 pb-6">
+          <div className="anim-in flex-1 flex flex-col min-h-0 px-4 pt-6 pb-5">
 
-            {/* PIN label + team identity */}
-            <div className="shrink-0 mb-5 text-center">
-              <p className="font-['Geist',sans-serif] text-[10px] text-[#909097] uppercase tracking-widest m-0 mb-1">
+            {/* Header */}
+            <div className="shrink-0 text-center mb-5">
+              <p className="font-['Geist',sans-serif] text-[10px] text-[#909097] uppercase tracking-widest mb-1">
                 Joining as <span className="text-[#e45d35]">{selectedFranchise}</span>
               </p>
-              <h2 className="font-['Archivo_Narrow',sans-serif] text-2xl font-bold text-[#e0e3e4] uppercase m-0 mb-1 tracking-wide">
+              <h2 className="font-['Archivo_Narrow',sans-serif] text-2xl font-bold text-[#e0e3e4] uppercase tracking-wide m-0">
                 ENTER SECURE PIN
               </h2>
-              <p className="font-['Geist',sans-serif] text-xs text-[#909097] uppercase tracking-widest mt-1 text-center">
+              <p className="font-['Geist',sans-serif] text-[10px] text-[#909097] uppercase tracking-widest mt-1">
                 Authorized personnel only
               </p>
             </div>
 
             {/* PIN boxes */}
-            <div className="shrink-0 flex gap-1.5 mb-5">
+            <div className="shrink-0 flex gap-3 mb-5">
               {[...Array(6)].map((_, i) => (
                 <div
                   key={i}
                   className={[
-                    "flex-1 h-[52px] border rounded-lg flex items-center justify-center",
+                    "flex-1 h-[64px] border rounded-xl flex items-center justify-center",
                     "font-['Archivo_Narrow',sans-serif] text-[22px] font-bold text-[#e45d35] transition-all duration-200",
-                    "bg-[rgba(16,20,21,0.6)] border-white/10",
-                    i < pin.length ? "pin-filled" : "",
+                    "bg-[rgba(16,20,21,0.6)]",
+                    i < pin.length
+                      ? "border-[rgba(228,93,53,0.6)] shadow-[0_0_10px_rgba(228,93,53,0.3)] scale-105"
+                      : "border-white/10",
                   ].join(" ")}
                   style={{ backdropFilter: "blur(20px)" }}
                 >
@@ -174,27 +176,37 @@ export default function JoinPage() {
             </div>
 
             {/* Keypad */}
-            <div className="shrink-0 grid grid-cols-3 gap-2 mb-4">
+            <div
+              className="flex-1 grid grid-cols-3 gap-4 mb-4"
+              style={{ gridTemplateRows: "repeat(4, 1fr)" }}
+            >
               {["1","2","3","4","5","6","7","8","9"].map((num) => (
                 <button
                   key={num}
-                  className="key-btn h-14 border border-white/10 rounded-xl flex items-center justify-center font-['Archivo_Narrow',sans-serif] text-2xl font-semibold text-[#e0e3e4] cursor-pointer transition-all duration-150 hover:bg-white/5 bg-[rgba(16,20,21,0.6)]"
+                  className="key-btn border border-white/10 rounded-xl flex items-center justify-center font-['Archivo_Narrow',sans-serif] text-2xl font-semibold text-[#e0e3e4] transition-all duration-150 hover:bg-white/5 bg-[rgba(16,20,21,0.6)]"
                   style={{ backdropFilter: "blur(20px)" }}
                   onClick={() => handleKeyClick(num)}
-                >{num}</button>
+                >
+                  {num}
+                </button>
               ))}
+
               <button
-                className="key-btn h-14 border border-white/10 rounded-xl flex items-center justify-center font-['Geist',sans-serif] text-xs tracking-wider text-[#ffb4ab] cursor-pointer transition-all duration-150 hover:bg-white/5 bg-[rgba(16,20,21,0.6)]"
+                className="key-btn border border-white/10 rounded-xl flex items-center justify-center font-['Geist',sans-serif] text-xs tracking-wider text-[#ffb4ab] transition-all duration-150 hover:bg-white/5 bg-[rgba(16,20,21,0.6)]"
                 style={{ backdropFilter: "blur(20px)" }}
                 onClick={handleClear}
-              >CLEAR</button>
+              >
+                CLEAR
+              </button>
               <button
-                className="key-btn h-14 border border-white/10 rounded-xl flex items-center justify-center font-['Archivo_Narrow',sans-serif] text-2xl font-semibold text-[#e0e3e4] cursor-pointer transition-all duration-150 hover:bg-white/5 bg-[rgba(16,20,21,0.6)]"
+                className="key-btn border border-white/10 rounded-xl flex items-center justify-center font-['Archivo_Narrow',sans-serif] text-2xl font-semibold text-[#e0e3e4] transition-all duration-150 hover:bg-white/5 bg-[rgba(16,20,21,0.6)]"
                 style={{ backdropFilter: "blur(20px)" }}
                 onClick={() => handleKeyClick("0")}
-              >0</button>
+              >
+                0
+              </button>
               <button
-                className="key-btn h-14 rounded-xl flex items-center justify-center cursor-pointer transition-all duration-150 bg-transparent border-none"
+                className="key-btn rounded-xl flex items-center justify-center transition-all duration-150 bg-transparent border-none"
                 onClick={handleBackspace}
               >
                 <span className="material-symbols-outlined text-[28px] text-[#c6c6cd]">backspace</span>
@@ -206,7 +218,7 @@ export default function JoinPage() {
               onClick={handleVerify}
               disabled={pin.length < 6 || verifyState !== "idle"}
               className={[
-                "shrink-0 w-full h-[60px] rounded-xl font-['Archivo_Narrow',sans-serif] text-lg font-bold uppercase tracking-widest",
+                "shrink-0 w-full h-[64px] rounded-xl font-['Archivo_Narrow',sans-serif] text-lg font-bold uppercase tracking-widest",
                 "flex items-center justify-center gap-2 transition-all duration-300 border",
                 verifyState === "granted"
                   ? "bg-green-700 text-white border-transparent"

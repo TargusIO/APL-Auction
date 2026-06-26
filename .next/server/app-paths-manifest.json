@@ -1,7 +1,3 @@
 {
-  "/(Teams)/history/page": "app/(Teams)/history/page.js",
-  "/(Teams)/join/page": "app/(Teams)/join/page.js",
-  "/(Teams)/squad/page": "app/(Teams)/squad/page.js",
-  "/(Teams)/bid/page": "app/(Teams)/bid/page.js",
-  "/(Teams)/budget/page": "app/(Teams)/budget/page.js"
+  "/(Teams)/join/page": "app/(Teams)/join/page.js"
 }
