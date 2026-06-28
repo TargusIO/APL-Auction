@@ -3,16 +3,15 @@
 
 import React, { use, useCallback, useEffect, useRef, useState } from "react";
 import { AuctionProvider, useAuction } from "@/context/AuctionContext";
+import { ShotClockProvider, useShotClock } from "@/context/ShotClockContext";
 import { AuctionStamp } from "@/components/AuctionStamp";
 import DesktopOnlyWrapper from "@/components/DesktopOnlyWrapper";
 import {
   loadLiveState,
-  loadTeamPurses,
   startLot,
   placeBid,
   closeLotSold,
   closeLotUnsold,
-  initTeamPurses,
   subscribeToLot,
   subscribeToBids,
   subscribeToTeamPurses,
@@ -21,16 +20,16 @@ import {
   type BidEntry,
   startRandomLot,
 } from "@/lib/auctionLiveDb";
-import type { Player, Team } from "@/types/auction";
+import { ensureTeamPurses, fmtPts, type TeamPurse } from "@/lib/auctionLiveUtils";
+import type { Player } from "@/types/auction";
 
 type SoldState = "pending" | "sold" | "unsold";
-type TeamPurse = { remaining: number; roster: number };
 
 type Particle = {
-  id: number;
-  tx: number;
-  ty: number;
-  color: string;
+  id:       number;
+  tx:       number;
+  ty:       number;
+  color:    string;
   duration: number;
 };
 
@@ -39,24 +38,29 @@ const PARTICLE_COLORS_UNSOLD = ["#718096", "#A0AEC0", "#CBD5E0", "#E2E8F0"];
 
 let particleIdCtr = 0;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INNER CONTENT  (needs both AuctionContext and ShotClockContext)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function AuctioneerContent({ auctionId }: { auctionId: string }) {
   const { auction, loadFromDb, handleStop, shuffleReady, handleShuffle } = useAuction();
+  const { shotClock, isLocked, resetClock, freezeClock, pauseClock }    = useShotClock();
 
-  const [loading,         setLoading]         = useState(true);
-  const [currentLot,      setCurrentLot]      = useState<AuctionLot | null>(null);
-  const [bidHistory,      setBidHistory]       = useState<BidEntry[]>([]);
-  const [completedLots,   setCompletedLots]   = useState<AuctionLot[]>([]);
-  const [lotNumber,       setLotNumber]        = useState(0);
-  const [teamPurses,      setTeamPurses]       = useState<Record<string, TeamPurse>>({});
-  const [playerQueue,     setPlayerQueue]      = useState<Player[]>([]);
+  const [loading,         setLoading]        = useState(true);
+  const [currentLot,      setCurrentLot]     = useState<AuctionLot | null>(null);
+  const [bidHistory,      setBidHistory]     = useState<BidEntry[]>([]);
+  const [completedLots,   setCompletedLots]  = useState<AuctionLot[]>([]);
+  const [lotNumber,       setLotNumber]      = useState(0);
+  const [teamPurses,      setTeamPurses]     = useState<Record<string, TeamPurse>>({});
+  const [playerQueue,     setPlayerQueue]    = useState<Player[]>([]);
 
-  const [soldState,       setSoldState]        = useState<SoldState>("pending");
-  const [flashActive,     setFlashActive]      = useState(false);
-  const [glowActive,      setGlowActive]       = useState(false);
-  const [particles,       setParticles]        = useState<Particle[]>([]);
-  const [actionError,     setActionError]      = useState<string | null>(null);
-  const [isBusy,          setIsBusy]           = useState(false);
-  const [isShufflingPool, setIsShufflingPool]  = useState(false);
+  const [soldState,       setSoldState]      = useState<SoldState>("pending");
+  const [flashActive,     setFlashActive]    = useState(false);
+  const [glowActive,      setGlowActive]     = useState(false);
+  const [particles,       setParticles]      = useState<Particle[]>([]);
+  const [actionError,     setActionError]    = useState<string | null>(null);
+  const [isBusy,          setIsBusy]         = useState(false);
+  const [isShufflingPool, setIsShufflingPool] = useState(false);
 
   const flashTimeout  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentLotRef = useRef(currentLot);
@@ -77,124 +81,134 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
   }, [auctionId, auction?.auctionId, loadFromDb]);
 
   // ── Step 2: load live state once context is ready ─────────────────────────
-    useEffect(() => {
+  useEffect(() => {
     if (!auction?.auctionId) return;
 
     async function init() {
-        // Load purses FIRST before any init
-        const dbPurses = await loadTeamPurses(auctionId);
-        
-        const purses: Record<string, TeamPurse> = {};
-        for (const t of auction.teams) {
-        if (t.supabaseId) {
-            purses[t.supabaseId] = dbPurses[t.supabaseId] ?? {
-            remaining: auction.rules.totalPoints,
-            roster:    t.roster,
-            };
-        }
-        }
-        setTeamPurses(purses); // ← set real DB values first
+      // FIX (Redundancy 1): shared ensureTeamPurses replaces the copy-pasted
+      // 20-line purse init block that was in both live and watch pages.
+      const purses = await ensureTeamPurses(
+        auctionId,
+        auction.teams,
+        auction.rules.totalPoints
+      );
+      setTeamPurses(purses);
 
-        // Only init purses for teams that have never been initialized (remaining_purse is null)
-        const hasUninitializedTeams = Object.keys(dbPurses).length < auction.teams.length ||
-        auction.teams.some(t => t.supabaseId && !dbPurses[t.supabaseId]);
-        
-        if (hasUninitializedTeams) {
-        await initTeamPurses(auctionId, auction.rules.totalPoints).catch(() => {});
-        // Re-fetch after init
-        const freshPurses = await loadTeamPurses(auctionId);
-        const freshMap: Record<string, TeamPurse> = {};
-        for (const t of auction.teams) {
-            if (t.supabaseId) {
-            freshMap[t.supabaseId] = freshPurses[t.supabaseId] ?? {
-                remaining: auction.rules.totalPoints,
-                roster:    t.roster,
-            };
-            }
-        }
-        setTeamPurses(freshMap);
-        }
+      const liveData = await loadLiveState(auctionId);
+      setCurrentLot(liveData.currentLot);
+      setBidHistory(liveData.bidHistory);
+      setCompletedLots(liveData.completedLots);
+      setLotNumber(liveData.lotNumber);   // FIX (Bug 7): now the lot's own number
 
-        const liveData = await loadLiveState(auctionId);
-        setCurrentLot(liveData.currentLot);
-        setBidHistory(liveData.bidHistory);
-        setCompletedLots(liveData.completedLots);
-        setLotNumber(liveData.lotNumber);
+      if (liveData.currentLot?.status === "sold") {
+        setSoldState("sold");
+        freezeClock();
+      } else if (liveData.currentLot?.status === "unsold") {
+        setSoldState("unsold");
+        freezeClock();
+      } else if (liveData.currentLot) {
+        // FIX (clock drift): anchor to the real event time — the latest bid
+        // if one exists, otherwise the lot's own start time — instead of
+        // resetting to "now" on every page reload. Without this, refreshing
+        // the page mid-lot silently gave this client extra time vs. anyone
+        // who didn't refresh.
+        const anchor = liveData.bidHistory[0]?.placedAt ?? liveData.currentLot.startedAt;
+        resetClock(anchor);
+      } else {
+        pauseClock(); // no active lot
+      }
 
-        if (liveData.currentLot?.status === "sold")   setSoldState("sold");
-        if (liveData.currentLot?.status === "unsold") setSoldState("unsold");
+      const usedIds = new Set(liveData.completedLots.map((l) => l.playerId));
+      if (liveData.currentLot) usedIds.add(liveData.currentLot.playerId);
+      setPlayerQueue(auction.players.filter((p) => !usedIds.has(p.supabaseId ?? "")));
 
-        const usedIds = new Set(liveData.completedLots.map((l) => l.playerId));
-        if (liveData.currentLot) usedIds.add(liveData.currentLot.playerId);
-        setPlayerQueue(auction.players.filter((p) => !usedIds.has(p.supabaseId ?? "")));
-
-        setLoading(false);
+      setLoading(false);
     }
 
     init().catch(console.error);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [auction?.auctionId]);
+  }, [auction?.auctionId]);
 
   // ── Realtime subscriptions ────────────────────────────────────────────────
   useEffect(() => {
     if (!auction?.auctionId) return;
 
+    // FIX (Redundancy 3): orphan-close guard now lives inside subscribeToLot.
     const lotSub = subscribeToLot(auctionId, (lot) => {
-        const isNewLot = currentLotRef.current?.id !== lot.id;
-        setCurrentLot(lot);
+      const isNewLot = currentLotRef.current?.id !== lot.id;
+      setCurrentLot(lot);
 
-        if (lot.status === "pending") {
+      if (lot.status === "pending") {
         if (isNewLot) {
-            setPlayerQueue((prev) => prev.filter((p) => p.supabaseId !== lot.playerId));
-            setBidHistory([]);
+          setPlayerQueue((prev) => prev.filter((p) => p.supabaseId !== lot.playerId));
+          setBidHistory([]);
+          // FIX (clock drift): anchor to the lot's real startedAt, not the
+          // moment this realtime event happened to arrive.
+          resetClock(lot.startedAt);
         }
         setSoldState("pending");
         setGlowActive(false);
-        }
+      }
 
-        if (lot.status === "sold") {
+      if (lot.status === "sold") {
         setSoldState("sold");
         setGlowActive(true);
+        freezeClock();
         setCompletedLots((prev) =>
-            prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]
+          prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]
         );
-        }
+      }
 
-        if (lot.status === "unsold") {
+      if (lot.status === "unsold") {
         setSoldState("unsold");
+        freezeClock();
         setCompletedLots((prev) =>
-            prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]
+          prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]
         );
+        // FIX (Bug 4): if unsold reintroduction is on, put the player back
+        // at the end of the queue so the auctioneer can re-call them.
+        if (auctionRef.current?.session.unsoldReintroduce) {
+          const player = auctionRef.current.players.find(
+            (p) => p.supabaseId === lot.playerId
+          );
+          if (player) {
+            setPlayerQueue((prev) => {
+              const already = prev.some((p) => p.supabaseId === lot.playerId);
+              return already ? prev : [...prev, player];
+            });
+          }
         }
+      }
     }, getCurrentLotId);
 
+    // FIX (Bug 3): guard bids against stale lots; also drive shot clock reset
     const bidSub = subscribeToBids(auctionId, (bid) => {
-        setBidHistory((prev) => [bid, ...prev].slice(0, 30));
-        setCurrentLot((prev) =>
+      if (bid.lotId !== currentLotRef.current?.id) return; // stale bid guard
+      setBidHistory((prev) => [bid, ...prev].slice(0, 30));
+      setCurrentLot((prev) =>
         prev
-            ? { ...prev, currentBid: bid.amount, winningTeamCode: bid.teamCode, winningTeamId: bid.teamId }
-            : prev
-        );
+          ? { ...prev, currentBid: bid.amount, winningTeamCode: bid.teamCode, winningTeamId: bid.teamId }
+          : prev
+      );
+      // FIX (clock drift): anchor to the bid's real placedAt timestamp so
+      // every viewer's countdown agrees, instead of each client resetting
+      // to "now" whenever its own websocket delivered the event.
+      resetClock(bid.placedAt);
     });
 
-    console.log("[realtime] setting up purse subscription for auction", auctionId);
-
     const purseSub = subscribeToTeamPurses(
-        auctionId,
-        (teamId, remaining, roster) => {
-        console.log("[purse change fired]", { teamId, remaining, roster });
+      auctionId,
+      (teamId, remaining, roster) => {
         setTeamPurses((prev) => ({ ...prev, [teamId]: { remaining, roster } }));
-        }
+      }
     );
 
-    console.log("[purseSub channel]", purseSub);
-
     return () => {
-        lotSub.unsubscribe();
-        bidSub.unsubscribe();
-        purseSub.unsubscribe();
+      lotSub.unsubscribe();
+      bidSub.unsubscribe();
+      purseSub.unsubscribe();
     };
-  }, [auctionId, auction?.auctionId, getCurrentLotId]);
+  }, [auctionId, auction?.auctionId, getCurrentLotId, resetClock, freezeClock]);
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -240,13 +254,16 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
     setIsBusy(true);
     setActionError(null);
     try {
-      const newLot = await startRandomLot(auctionId);
+      const newLot = await startRandomLot(auctionId); // FIX (Bug 1): normalised in lib
       setCurrentLot(newLot);
       setLotNumber(newLot.lotNumber);
       setSoldState("pending");
       setGlowActive(false);
       setBidHistory([]);
       setPlayerQueue((prev) => prev.filter((p) => p.supabaseId !== newLot.playerId));
+      // FIX (clock drift): anchor to the new lot's own startedAt rather than
+      // "now" — keeps this auctioneer's clock in sync with everyone else's.
+      resetClock(newLot.startedAt);
     } catch (err: any) {
       setActionError(err?.message ?? "Failed to start next player");
     } finally {
@@ -255,6 +272,8 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
   }
 
   async function handleHammerSold() {
+    // Auctioneer CAN still act even when isLocked — that's the design.
+    // isLocked just means no more team bids; the auctioneer decides the outcome.
     if (isBusy || soldState !== "pending" || !currentLot) return;
     if (!currentLot.winningTeamId) {
       setActionError("No bid placed — mark unsold instead");
@@ -273,6 +292,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
       setSoldState("sold");
       setFlashActive(true);
       setGlowActive(true);
+      freezeClock();
       spawnParticles(PARTICLE_COLORS_SOLD);
       flashTimeout.current = setTimeout(() => setFlashActive(false), 100);
     } catch (err: any) {
@@ -289,6 +309,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
     try {
       await closeLotUnsold(currentLot.id, currentLot.playerId);
       setSoldState("unsold");
+      freezeClock();
       spawnParticles(PARTICLE_COLORS_UNSOLD);
     } catch (err: any) {
       setActionError(err?.message ?? "Failed to mark unsold");
@@ -321,7 +342,9 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
       : soldState === "unsold"
       ? "Marked Unsold"
       : currentLot
-      ? "Currently on Block"
+      ? isLocked
+        ? "Bidding Locked — Make Decision"
+        : "Currently on Block"
       : "Awaiting First Lot";
 
   const totalSlotsLeft = auction.teams.reduce((sum, t) => {
@@ -339,6 +362,10 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
           }, 0) / auction.teams.length
         )
       : 0;
+
+  // Shot clock colour
+  const shotClockColor =
+    shotClock < 25 ? "#ef4444" : shotClock < 50 ? "#f59e0b" : "#F5B400";
 
   // ── Loading ───────────────────────────────────────────────────────────────
   if (!auction || loading) {
@@ -378,7 +405,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
         @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
 
         .font-archivo    { font-family: 'Archivo Narrow', sans-serif; }
-        .font-mono-geist { font-family: 'Geist', monospace; }
+        .font-mono-geist { font-family: 'Geist Mono', monospace; }
         .font-inter      { font-family: 'Inter', sans-serif; }
 
         .material-symbols-outlined {
@@ -458,7 +485,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
         }
         .sold-sub {
           display: block; text-align: center;
-          font-family: 'Geist', monospace;
+          font-family: 'Geist Mono', monospace;
           font-size: 9px; font-weight: 500;
           letter-spacing: 0.42em; text-transform: uppercase;
           color: rgba(245,180,0,0.6);
@@ -514,12 +541,18 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
         }
         .unsold-sub {
           display: block; text-align: center;
-          font-family: 'Geist', monospace;
+          font-family: 'Geist Mono', monospace;
           font-size: 9px; font-weight: 500;
           letter-spacing: 0.35em; text-transform: uppercase;
           color: rgba(160,174,192,0.55);
           margin-top: 8px; position: relative; z-index: 2;
         }
+
+        @keyframes locked-pulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+          50%     { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+        }
+        .locked-pulse { animation: locked-pulse 1.2s ease-in-out infinite; }
       `}</style>
 
       {/* Particles */}
@@ -584,6 +617,23 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
         </div>
       )}
 
+      {/* Bidding locked banner */}
+      {isLocked && soldState === "pending" && currentLot && (
+        <div
+          className="fixed top-20 left-1/2 -translate-x-1/2 z-[295] flex items-center gap-3 px-5 py-2 rounded-full text-xs font-bold locked-pulse"
+          style={{
+            background: "rgba(239,68,68,0.12)",
+            border: "1px solid rgba(239,68,68,0.5)",
+            color: "#ef4444",
+            fontFamily: "'Geist Mono', monospace",
+            backdropFilter: "blur(12px)",
+          }}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>timer_off</span>
+          Bidding locked — hammer sold or mark unsold
+        </div>
+      )}
+
       {/* Shuffle-required banner */}
       {!shuffleReady && (
         <div
@@ -631,6 +681,23 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
           </div>
         </div>
         <div className="flex items-center gap-8">
+          {/* Shot clock bar in header */}
+          {currentLot && soldState === "pending" && (
+            <div className="flex items-center gap-3">
+              <span
+                className="font-mono-geist text-[10px] uppercase tracking-[0.1em]"
+                style={{ color: shotClockColor }}
+              >
+                {isLocked ? "Locked" : "Clock"}
+              </span>
+              <div className="w-24 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-100"
+                  style={{ width: `${shotClock}%`, background: shotClockColor }}
+                />
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2 text-on-surface-variant font-mono-geist text-[10px] uppercase tracking-[0.12em]">
             <span className="material-symbols-outlined text-sm">lock</span>
             Secure Admin Node
@@ -719,6 +786,8 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                 ? "scale-[1.01] shadow-[0_0_80px_rgba(245,180,0,0.12)]"
                 : soldState === "unsold"
                 ? "scale-[1.01] shadow-[0_0_60px_rgba(113,128,150,0.1)]"
+                : isLocked
+                ? "shadow-[0_0_40px_rgba(239,68,68,0.08)]"
                 : ""
             }`}
           >
@@ -747,6 +816,19 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                   <div className="absolute top-2 right-2 z-20 bg-white text-black px-2 py-1 rounded font-mono-geist text-[10px] font-bold tracking-[0.32em] shadow-lg">
                     LOT #{currentLot?.lotNumber ?? "—"}
                   </div>
+                  {/* Shot clock overlay on photo */}
+                  {currentLot && soldState === "pending" && (
+                    <div className="absolute bottom-0 left-0 right-0 h-1">
+                      <div
+                        className="h-full transition-all duration-100"
+                        style={{
+                          width: `${shotClock}%`,
+                          background: shotClockColor,
+                          boxShadow: `0 0 6px ${shotClockColor}`,
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-2 w-full mt-3">
@@ -829,7 +911,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                 </div>
               </div>
 
-              {/* Player info + bidding controls */}
+              {/* Player info + bidding info */}
               <div className="flex-1 space-y-4">
                 <div className="space-y-1">
                   <span
@@ -840,6 +922,8 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                           ? "#F5B400"
                           : soldState === "unsold"
                           ? "#718096"
+                          : isLocked
+                          ? "#ef4444"
                           : "#e45d35",
                     }}
                   >
@@ -853,7 +937,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                       {currentLot?.playerRole ?? "—"} | {currentLot?.playerCountry ?? "—"}
                     </span>
                     <span className="px-3 py-1 bg-white/10 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em]">
-                      Base: {(currentLot?.basePrice ?? 0).toLocaleString()} pts
+                      Base: {fmtPts(currentLot?.basePrice)} pts
                     </span>
                     {currentPlayer?.capped && (
                       <span className="px-3 py-1 bg-amber-400/10 border border-amber-400/20 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em] text-amber-400">
@@ -865,29 +949,37 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
 
                 {/* Current bid display */}
                 {currentLot && (
-                  <div className="p-4 glass-panel rounded-xl">
+                  <div
+                    className={`p-4 glass-panel rounded-xl ${isLocked && soldState === "pending" ? "border-red-500/30" : ""}`}
+                    style={isLocked && soldState === "pending" ? { borderColor: "rgba(239,68,68,0.3)" } : {}}
+                  >
                     <div className="flex items-end justify-between mb-2">
                       <div>
-                        <p className="font-['Geist'] text-[9px] text-on-surface-variant uppercase tracking-[0.18em] mb-1">
+                        <p className="font-mono-geist text-[9px] text-on-surface-variant uppercase tracking-[0.18em] mb-1">
                           Current High Bid
                         </p>
                         <p className="font-archivo text-4xl font-bold text-amber-400">
-                          {currentLot.currentBid.toLocaleString()}
+                          {fmtPts(currentLot.currentBid)}
                           <span className="text-sm opacity-50 ml-1">pts</span>
                         </p>
                       </div>
                       {winningTeam && (
                         <div className="text-right">
-                          <p className="font-['Geist'] text-[9px] text-on-surface-variant uppercase tracking-[0.1em] mb-1">
+                          <p className="font-mono-geist text-[9px] text-on-surface-variant uppercase tracking-[0.1em] mb-1">
                             Leading
                           </p>
                           <p className="font-archivo text-xl font-bold text-white">{winningTeam.code}</p>
                         </div>
                       )}
                     </div>
-                    {soldState === "pending" && (
-                      <p className="font-['Geist'] text-[10px] text-on-surface-variant">
-                        Next bid: <span className="text-amber-400 font-bold">{nextBidAmount.toLocaleString()} pts</span>
+                    {soldState === "pending" && !isLocked && (
+                      <p className="font-mono-geist text-[10px] text-on-surface-variant">
+                        Next bid: <span className="text-amber-400 font-bold">{fmtPts(nextBidAmount)} pts</span>
+                      </p>
+                    )}
+                    {isLocked && soldState === "pending" && (
+                      <p className="font-mono-geist text-[10px]" style={{ color: "#ef4444" }}>
+                        Time expired — no further bids accepted
                       </p>
                     )}
                   </div>
@@ -950,7 +1042,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                           </div>
                         </td>
                         <td className="px-6 py-4 font-archivo font-semibold text-amber-400">
-                          {b.amount.toLocaleString()} pts
+                          {fmtPts(b.amount)} pts
                         </td>
                         <td className="px-6 py-4 text-right opacity-40 italic font-inter text-[10px]">
                           {i === 0 ? "Leading" : "Outbid"}
@@ -976,7 +1068,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                   Avg Purse
                 </span>
                 <span className="font-archivo text-lg font-bold text-on-surface leading-none">
-                  {avgPurse.toLocaleString()}
+                  {fmtPts(avgPurse)}
                   <span className="text-xs opacity-50 ml-1">pts</span>
                 </span>
               </div>
@@ -998,7 +1090,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
               const remaining = purse?.remaining ?? auction.rules.totalPoints;
               const totalPoints = auction.rules.totalPoints;
               const pctFilled = Math.round((remaining / Math.max(totalPoints, 1)) * 100);
-              const isFull = roster >= auction.rules.teamSize;
+              const isFull    = roster >= auction.rules.teamSize;
 
               return (
                 <div
@@ -1044,7 +1136,7 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
                     <div className="flex justify-between font-mono-geist text-[10px] uppercase tracking-[0.1em] font-bold">
                       <span className="text-on-surface-variant">Remaining Budget</span>
                       <span className="font-archivo text-[13px] font-semibold text-on-surface">
-                        {remaining.toLocaleString()} pts
+                        {fmtPts(remaining)} pts
                       </span>
                     </div>
                     <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
@@ -1067,6 +1159,21 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WRAPPER  — provides ShotClockProvider once session config is available
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AuctioneerWithClock({ auctionId }: { auctionId: string }) {
+  const { auction } = useAuction();
+  const timerSeconds = auction?.session?.timerSeconds ?? 15;
+
+  return (
+    <ShotClockProvider timerSeconds={timerSeconds}>
+      <AuctioneerContent auctionId={auctionId} />
+    </ShotClockProvider>
+  );
+}
+
 export default function LiveAuctioneerPage({
   params,
 }: {
@@ -1076,7 +1183,7 @@ export default function LiveAuctioneerPage({
   return (
     <AuctionProvider>
       <DesktopOnlyWrapper>
-        <AuctioneerContent auctionId={auctionId} />
+        <AuctioneerWithClock auctionId={auctionId} />
       </DesktopOnlyWrapper>
     </AuctionProvider>
   );

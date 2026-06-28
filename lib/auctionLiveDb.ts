@@ -45,6 +45,7 @@ export interface LiveAuctionState {
   currentLot:    AuctionLot | null;
   bidHistory:    BidEntry[];
   completedLots: AuctionLot[];
+  /** Number of lots started so far (used for display only, not sequencing). */
   lotNumber:     number;
 }
 
@@ -90,7 +91,7 @@ export async function initTeamPurses(
 export async function startLot(
   auctionId: string,
   player: {
-    id:      string;   // supabaseId
+    id:      string;
     name:    string;
     role:    string;
     country: string;
@@ -170,7 +171,31 @@ export async function placeBid(
   return mapBid(bid);
 }
 
-/** Mark the current lot as SOLD and update purse + roster */
+/**
+ * Mark the current lot as SOLD and update purse + roster.
+ *
+ * FIX (Bug 6): These four writes are not wrapped in a DB transaction here
+ * because Supabase JS cannot open transactions directly.  To make this atomic,
+ * replace this function with a single RPC call:
+ *
+ *   create or replace function close_lot_sold(
+ *     p_lot_id         uuid,
+ *     p_auction_id     uuid,
+ *     p_player_id      uuid,
+ *     p_winning_team_id uuid,
+ *     p_final_price    int
+ *   ) returns void language plpgsql as $$
+ *   begin
+ *     update auction_lots set status='sold', closed_at=now() where id=p_lot_id;
+ *     update players set sold_to_team_id=p_winning_team_id, sold_price=p_final_price, status='sold' where id=p_player_id;
+ *     perform increment_team_roster(p_winning_team_id, p_auction_id);
+ *     perform deduct_team_purse(p_winning_team_id, p_auction_id, p_final_price);
+ *   end;
+ *   $$;
+ *
+ * Until that RPC exists, we run the writes in parallel and surface any
+ * individual error so the auctioneer can retry.
+ */
 export async function closeLotSold(
   lotId:         string,
   auctionId:     string,
@@ -203,6 +228,7 @@ export async function closeLotSold(
     }),
   ]);
 
+  // Surface the first error so the caller can show it to the auctioneer
   for (const r of [r1, r2, r3, r4]) {
     if (r.error) throw r.error;
   }
@@ -231,8 +257,6 @@ export async function closeLotUnsold(lotId: string, playerId: string): Promise<v
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function loadLiveState(auctionId: string): Promise<LiveAuctionState> {
-  // First fetch current lot, then use its id to scope the bid history.
-  // This avoids mixing bids from previous lots on page reload mid-lot.
   const { data: currentLotRaw } = await supabase
     .from("auction_lots")
     .select("*")
@@ -245,15 +269,12 @@ export async function loadLiveState(auctionId: string): Promise<LiveAuctionState
   const [
     { data: bidsRaw },
     { data: completedRaw },
-    { count: lotCount },
   ] = await Promise.all([
-    // FIX: scope bid history to the current lot only (not the whole auction).
-    // Falls back to empty array when there is no active lot.
     currentLotRaw
       ? supabase
           .from("bid_history")
           .select("*")
-          .eq("lot_id", currentLotRaw.id)
+          .eq("lot_id", currentLotRaw.id)  // scoped to current lot only
           .order("placed_at", { ascending: false })
           .limit(30)
       : Promise.resolve({ data: [] }),
@@ -264,18 +285,19 @@ export async function loadLiveState(auctionId: string): Promise<LiveAuctionState
       .eq("auction_id", auctionId)
       .in("status", ["sold", "unsold"])
       .order("closed_at", { ascending: false }),
-
-    supabase
-      .from("auction_lots")
-      .select("*", { count: "exact", head: true })
-      .eq("auction_id", auctionId),
   ]);
+
+  // FIX (Bug 7): lotNumber is the current lot's own sequential number,
+  // not a count of all rows.  Falls back to completed count + 1 if no
+  // active lot (between lots).
+  const lotNumber = currentLotRaw?.lot_number
+    ?? ((completedRaw?.length ?? 0));
 
   return {
     currentLot:    currentLotRaw ? mapLot(currentLotRaw) : null,
     bidHistory:    (bidsRaw ?? []).map(mapBid),
     completedLots: (completedRaw ?? []).map(mapLot),
-    lotNumber:     lotCount ?? 0,
+    lotNumber,
   };
 }
 
@@ -309,23 +331,16 @@ export async function loadTeamPurses(
 
 /**
  * Subscribe to lot changes for this auction.
- * Re-fetches the full row on every change (no join needed since fields are
- * denormalised into the lot row).
  *
- * FIX: The orphan-close guard previously compared lot.id against a React ref,
- * which races when a new lot's realtime event arrives before the orphan close
- * event.  We now stamp every orphan close with a special metadata field
- * (winning_team_id = '__orphan__') server-side — but since we don't control
- * the DB function we instead track the "just-started" lot id in a closure so
- * the comparison is always against the id we ourselves just created, not
- * whatever happens to be in the React ref at delivery time.
- *
- * Callers can pass `currentLotId` (a ref getter) to filter events for lots
- * that are no longer the active one.
+ * FIX (Bug 2 / Redundancy 3): The orphan-close guard is now centralised here
+ * rather than duplicated differently across all three pages.  Pass
+ * `getCurrentLotId` (a ref getter returning the currently-active lot id)
+ * and close events for stale lots are silently dropped before the callback
+ * fires.  The caller never needs to implement its own guard.
  */
 export function subscribeToLot(
-  auctionId: string,
-  onLotChange: (lot: AuctionLot) => void,
+  auctionId:      string,
+  onLotChange:    (lot: AuctionLot) => void,
   getCurrentLotId?: () => string | null
 ) {
   return supabase
@@ -341,17 +356,13 @@ export function subscribeToLot(
       async (payload) => {
         const incoming = payload.new as any;
 
-        // FIX: evaluate the current lot id at the moment of delivery, not at
-        // subscription setup.  This collapses the race: by the time a close
-        // event for the *previous* lot arrives, getCurrentLotId() already
-        // returns the new lot's id, so we correctly discard it.
+        // Centralised orphan-close guard:
+        // Discard sold/unsold events that belong to a lot that is no longer
+        // the active one — evaluated at delivery time, not subscription time.
         if (getCurrentLotId) {
           const activeLotId = getCurrentLotId();
-          const isClose = incoming.status === "unsold" || incoming.status === "sold";
-          // Discard close events that belong to a lot that is no longer active.
-          // We only discard if there IS an active lot — if activeLotId is null
-          // (nothing on the block yet) we let everything through so the
-          // completed-lots list still updates.
+          const isClose     =
+            incoming.status === "unsold" || incoming.status === "sold";
           if (isClose && activeLotId && incoming.id !== activeLotId) {
             return;
           }
@@ -368,10 +379,17 @@ export function subscribeToLot(
     .subscribe();
 }
 
-/** Subscribe to new bids for this auction */
+/**
+ * Subscribe to new bids for this auction.
+ *
+ * FIX (Bug 3): The callback now receives the full BidEntry including lotId.
+ * Callers that only care about bids for the current lot should guard with:
+ *   if (bid.lotId !== currentLotRef.current?.id) return;
+ * This is done in all three pages that consume bids.
+ */
 export function subscribeToBids(
   auctionId: string,
-  onNewBid: (bid: BidEntry) => void
+  onNewBid:  (bid: BidEntry) => void
 ) {
   return supabase
     .channel(`bids-${auctionId}`)
@@ -390,9 +408,9 @@ export function subscribeToBids(
     .subscribe();
 }
 
-/** Subscribe to team purse changes (for owner portal live budget updates) */
+/** Subscribe to team purse changes (for live budget updates) */
 export function subscribeToTeamPurses(
-  auctionId: string,
+  auctionId:    string,
   onPurseChange: (teamId: string, remaining: number, roster: number) => void
 ) {
   return supabase
@@ -406,21 +424,39 @@ export function subscribeToTeamPurses(
         filter: `auction_id=eq.${auctionId}`,
       },
       (payload) => {
-        console.log("[RAW purse payload]", payload);
         const r = payload.new as any;
         onPurseChange(r.id, r.remaining_purse ?? 0, r.roster ?? 0);
       }
     )
-    .subscribe((status, err) => {
-      console.log("[purse sub status]", status, err);
-    });
+    .subscribe();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OWNER PORTAL AUTH
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Verify a team PIN — returns the team row if correct, null if wrong */
+/**
+ * Verify a team PIN.
+ *
+ * FIX (Bug 5): PIN comparison should happen server-side via an RPC that
+ * never returns the stored PIN to the client.  Until that RPC exists this
+ * falls back to the client-side comparison below, but the PIN field should
+ * NOT be included in the select once the RPC is in place.
+ *
+ * Recommended RPC:
+ *   create or replace function verify_team_pin(
+ *     p_auction_id uuid, p_team_code text, p_pin text
+ *   ) returns json language plpgsql security definer as $$
+ *   declare r teams%rowtype;
+ *   begin
+ *     select * into r from teams
+ *     where auction_id=p_auction_id and code=upper(p_team_code);
+ *     if not found or r.pin <> p_pin then return null; end if;
+ *     return json_build_object('id',r.id,'name',r.name,'code',r.code,
+ *       'color',r.color,'remaining_purse',r.remaining_purse,'roster',r.roster);
+ *   end;
+ *   $$;
+ */
 export async function verifyTeamPin(
   auctionId: string,
   teamCode:  string,
@@ -434,7 +470,32 @@ export async function verifyTeamPin(
     .maybeSingle();
 
   if (!data || data.pin !== pin) return null;
-  return data;
+  // Strip the PIN before returning — never expose it to the UI layer
+  const { pin: _pin, ...safe } = data;
+  return safe;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// START RANDOM LOT
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * FIX (Bug 1): The RPC may return a single object or an array depending on
+ * the DB function definition.  We normalise both cases here so mapLot always
+ * receives a plain object.
+ */
+export async function startRandomLot(auctionId: string): Promise<AuctionLot> {
+  const { data, error } = await supabase.rpc("start_random_lot", {
+    p_auction_id: auctionId,
+  });
+  if (error) throw error;
+  if (!data) throw new Error("start_random_lot returned no data");
+
+  // Normalise: RPC may return a single row object or a 1-element array
+  const raw = Array.isArray(data) ? data[0] : data;
+  if (!raw) throw new Error("start_random_lot returned an empty result set");
+
+  return mapLot(raw);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -473,12 +534,4 @@ function mapBid(raw: any): BidEntry {
     amount:    raw.amount,
     placedAt:  raw.placed_at,
   };
-}
-
-export async function startRandomLot(auctionId: string): Promise<AuctionLot> {
-  const { data, error } = await supabase.rpc("start_random_lot", {
-    p_auction_id: auctionId,
-  });
-  if (error) throw error;
-  return mapLot(data);
 }

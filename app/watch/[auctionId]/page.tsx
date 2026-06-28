@@ -6,9 +6,9 @@ import { FlowCanvas } from "@/components/FlowCanvas";
 import { AUCTION_CONFIG } from "./data";
 import { ShuffleOverlay } from "@/components/ShuffleOverlay";
 import { AuctionProvider, useAuction } from "@/context/AuctionContext";
+import { ShotClockProvider, useShotClock } from "@/context/ShotClockContext";
 import {
   loadLiveState,
-  loadTeamPurses,
   subscribeToLot,
   subscribeToBids,
   subscribeToTeamPurses,
@@ -16,9 +16,9 @@ import {
   type AuctionLot,
   type BidEntry,
 } from "@/lib/auctionLiveDb";
+import { ensureTeamPurses, shuffleArray, fmtPts, type TeamPurse } from "@/lib/auctionLiveUtils";
 import type { Player } from "@/types/auction";
 
-type TeamPurse  = { remaining: number; roster: number };
 type FlowPlayer = (typeof AUCTION_CONFIG.players)[number];
 type FlowTeam   = (typeof AUCTION_CONFIG.teams)[number];
 
@@ -35,17 +35,14 @@ function buildFlowTeam(overrides: {
   return { ...AUCTION_CONFIG.teams[0], ...overrides } as FlowTeam;
 }
 
-function shuffleArray<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// INNER CONTENT
+// ─────────────────────────────────────────────────────────────────────────────
 
 function ScreenContent({ auctionId }: { auctionId: string }) {
-  const { auction, loadFromDb } = useAuction();
+  const { auction, loadFromDb }                                   = useAuction();
+  // FIX (Redundancy 5): consume shot clock from context — no local timer
+  const { shotClock, isLocked, resetClock, freezeClock, pauseClock } = useShotClock();
 
   const [loadingLive, setLoadingLive]           = useState(true);
   const [teamPurses, setTeamPurses]             = useState<Record<string, TeamPurse>>({});
@@ -59,7 +56,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   const [isUnsold, setIsUnsold]                 = useState(false);
   const [bidPulse, setBidPulse]                 = useState(true);
   const [flashOverlay, setFlashOverlay]         = useState(false);
-  const [shotClock, setShotClock]               = useState(100);
   const [showLeaderboard, setShowLeaderboard]   = useState(false);
 
   const [isShuffling, setIsShuffling]           = useState(false);
@@ -68,15 +64,12 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   const [shufflePool, setShufflePool]           = useState<FlowPlayer[]>([]);
 
   const [activeView, setActiveView]             = useState<"live" | "flow">("live");
-
-  // Flow view selection — COMPLETELY INDEPENDENT of live auction state
   const [flowActivePlayer, setFlowActivePlayer] = useState<string | null>(null);
   const [flowActiveTeam, setFlowActiveTeam]     = useState<string | null>(null);
 
   const playerListRef = useRef<HTMLDivElement>(null);
   const teamListRef   = useRef<HTMLDivElement>(null);
 
-  const shotClockTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
   const leaderboardTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const flashTimeout     = useRef<ReturnType<typeof setTimeout>  | null>(null);
 
@@ -101,30 +94,35 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
     if (!auction?.auctionId) return;
 
     async function init() {
-      const dbPurses = await loadTeamPurses(auctionId);
-      const purses: Record<string, TeamPurse> = {};
-      for (const t of auction.teams) {
-        if (t.supabaseId) {
-          purses[t.supabaseId] = dbPurses[t.supabaseId] ?? {
-            remaining: auction.rules.totalPoints,
-            roster:    t.roster,
-          };
-        }
-      }
+      // FIX (Redundancy 1): shared helper replaces duplicate 20-line block
+      const purses = await ensureTeamPurses(
+        auctionId,
+        auction.teams,
+        auction.rules.totalPoints
+      );
       setTeamPurses(purses);
 
       const liveData = await loadLiveState(auctionId);
       setCurrentLot(liveData.currentLot);
       setBidHistory(liveData.bidHistory);
       setCompletedLots(liveData.completedLots);
-      setLotNumber(liveData.lotNumber);
+      setLotNumber(liveData.lotNumber); // FIX (Bug 7)
 
       const usedIds = new Set(liveData.completedLots.map((l) => l.playerId));
       if (liveData.currentLot) usedIds.add(liveData.currentLot.playerId);
       setRemainingPlayers(auction.players.filter((p) => !usedIds.has(p.supabaseId ?? "")));
 
-      if (liveData.currentLot?.status === "sold")   setIsSold(true);
-      if (liveData.currentLot?.status === "unsold") setIsUnsold(true);
+      if (liveData.currentLot?.status === "sold") {
+        setIsSold(true);
+        freezeClock();
+      } else if (liveData.currentLot?.status === "unsold") {
+        setIsUnsold(true);
+        freezeClock();
+      } else if (liveData.currentLot) {
+        resetClock();
+      } else {
+        pauseClock();
+      }
 
       setLoadingLive(false);
     }
@@ -143,6 +141,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   }, [auctionId, auction?.auctionId]);
 
   // Shuffle animation
+  // FIX (Redundancy 4): uses shared shuffleArray from auctionLiveUtils
   const triggerShuffleAndReveal = useCallback((lot: AuctionLot) => {
     setIsShuffling(true);
     setIsSold(false);
@@ -171,6 +170,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
     });
 
     const poolWithoutTarget = rawPool.filter((p) => p.id !== targetFlow.id);
+    // FIX (Redundancy 4): shared shuffleArray instead of local duplicate
     const shuffledPool      = shuffleArray(poolWithoutTarget);
     const targetIndex       = Math.floor(Math.random() * (shuffledPool.length + 1));
     shuffledPool.splice(targetIndex, 0, targetFlow);
@@ -202,27 +202,22 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
           setRemainingPlayers((prev) =>
             prev.filter((p) => (p.supabaseId ?? "") !== lot.playerId)
           );
-          setShotClock(100);
+          resetClock(); // new lot revealed — start the clock
         }, 900);
       }
     }
     spin();
-  }, []);
+  }, [resetClock]);
 
   // Realtime: lot + bid changes
   useEffect(() => {
     if (!auction?.auctionId) return;
 
+    // FIX (Redundancy 3): orphan-close guard is now inside subscribeToLot
+    const getCurrentLotId = () => currentLotRef.current?.id ?? null;
+
     const lotSub = subscribeToLot(auctionId, (lot) => {
       const isNewLot = currentLotRef.current?.id !== lot.id;
-
-      if (
-        currentLotRef.current &&
-        lot.id !== currentLotRef.current.id &&
-        (lot.status === "unsold" || lot.status === "sold")
-      ) {
-        return;
-      }
 
       if (lot.status === "pending" && isNewLot) {
         triggerShuffleAndReveal(lot);
@@ -234,7 +229,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
       if (lot.status === "sold") {
         setIsSold(true);
         setIsUnsold(false);
-        setShotClock(0);
+        freezeClock();
         setCompletedLots((prev) =>
           prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]
         );
@@ -242,14 +237,16 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
       if (lot.status === "unsold") {
         setIsUnsold(true);
         setIsSold(false);
-        setShotClock(0);
+        freezeClock();
         setCompletedLots((prev) =>
           prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]
         );
       }
-    });
+    }, getCurrentLotId);
 
+    // FIX (Bug 3): guard bids to current lot; also drive shot clock reset
     const bidSub = subscribeToBids(auctionId, (bid) => {
+      if (bid.lotId !== currentLotRef.current?.id) return; // stale bid guard
       setBidHistory((prev) => [bid, ...prev].slice(0, 30));
       setCurrentLot((prev) =>
         prev
@@ -261,29 +258,14 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
       setFlashOverlay(true);
       if (flashTimeout.current) clearTimeout(flashTimeout.current);
       flashTimeout.current = setTimeout(() => setFlashOverlay(false), 200);
-      setShotClock(100);
+      resetClock(); // new bid — reset shot clock
     });
 
     return () => {
       lotSub.unsubscribe();
       bidSub.unsubscribe();
     };
-  }, [auctionId, auction?.auctionId, triggerShuffleAndReveal]);
-
-  // Shot clock
-  useEffect(() => {
-    if (shotClockTimer.current) clearInterval(shotClockTimer.current);
-    shotClockTimer.current = setInterval(() => {
-      setShotClock((prev) => {
-        if (isSold || isUnsold || isShuffling || !currentLotRef.current) return prev;
-        if (prev <= 0) return 0;
-        const seconds = auctionRef.current?.session.timerSeconds ?? 15;
-        const drainPerTick = 100 / (seconds * 10);
-        return Math.max(0, prev - drainPerTick);
-      });
-    }, 100);
-    return () => { if (shotClockTimer.current) clearInterval(shotClockTimer.current); };
-  }, [isSold, isUnsold, isShuffling]);
+  }, [auctionId, auction?.auctionId, triggerShuffleAndReveal, resetClock, freezeClock]);
 
   // Leaderboard interrupt
   useEffect(() => {
@@ -300,7 +282,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   useEffect(() => {
     return () => {
       if (flashTimeout.current)     clearTimeout(flashTimeout.current);
-      if (shotClockTimer.current)   clearInterval(shotClockTimer.current);
       if (leaderboardTimer.current) clearInterval(leaderboardTimer.current);
     };
   }, []);
@@ -363,7 +344,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
     );
   }, [completedLots, auction?.session.auctionName]);
 
-  // ── flowPlayers: unsold gets its own status (not "locked") ───────────────
   const flowPlayers: FlowPlayer[] = useMemo(() => {
     if (!auction) return [];
     return auction.players.map((p) => {
@@ -381,7 +361,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
         return buildFlowPlayer({
           id: supId, name: p.name, img: p.img,
           price: `${p.price.toLocaleString()} CR`,
-          // ── KEY FIX: unsold gets "unsold" status, not "locked" ──
           status: closedLot.status === "sold" ? "sold" : "unsold" as any,
           teamShortCode: closedLot.status === "sold" ? closedLot.winningTeamCode : null,
         });
@@ -402,21 +381,20 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
         name:      t.name,
         shortCode: t.code,
         logoUrl:   t.logo || "",
-        purse:     `${(t.supabaseId ? teamPurses[t.supabaseId]?.remaining : undefined) ?? auction.rules.totalPoints} CR`,
+        purse:     `${fmtPts(t.supabaseId ? teamPurses[t.supabaseId]?.remaining : undefined) ?? fmtPts(auction.rules.totalPoints)} CR`,
       })
     );
   }, [auction, teamPurses]);
 
-  // Flow view handlers
-    const togglePlayer = (p: FlowPlayer) => {
+  const togglePlayer = (p: FlowPlayer) => {
     if (flowActivePlayer === String(p.id)) {
-        setFlowActivePlayer(null);
-        setFlowActiveTeam(null);
+      setFlowActivePlayer(null);
+      setFlowActiveTeam(null);
     } else {
-        setFlowActivePlayer(String(p.id));
-        setFlowActiveTeam((p as any).teamShortCode || null);
+      setFlowActivePlayer(String(p.id));
+      setFlowActiveTeam((p as any).teamShortCode || null);
     }
-    };
+  };
 
   const toggleTeam = (t: FlowTeam) => {
     if (flowActiveTeam === t.shortCode && !flowActivePlayer) {
@@ -433,7 +411,10 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   };
 
   const hasSelection = flowActivePlayer !== null || flowActiveTeam !== null;
-  const fmtCR = (n: number | undefined | null) => (n ?? 0).toLocaleString();
+
+  // Shot clock colour
+  const shotClockColor =
+    shotClock < 25 ? "#ef4444" : shotClock < 50 ? "#f59e0b" : "#e45d35";
 
   if (!auction || loadingLive) {
     return (
@@ -570,7 +551,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
             <div className="header-purse text-right hidden sm:block">
               <div className="font-mono-geist text-[8px] text-[rgba(198,198,205,0.6)] uppercase tracking-[0.1em]">Total Purse Cap</div>
               <div className="font-archivo text-[18px] font-bold text-white">
-                {fmtCR(auction.rules.totalPoints)} <span className="text-[9px] opacity-50">CR</span>
+                {fmtPts(auction.rules.totalPoints)} <span className="text-[9px] opacity-50">CR</span>
               </div>
             </div>
             <div className="w-px h-7 bg-white/10 hidden sm:block" />
@@ -642,17 +623,30 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                           <img src={currentLot.playerImg} alt={currentLot.playerName} className="w-full h-full object-cover object-top" style={{ filter: "grayscale(0.15) contrast(1.2)" }} />
                         ) : (
                           <div className="w-full h-full bg-[#1c2021] flex items-center justify-center">
-                            <span className="ms text-[#2a3a44] text-6xl">person</span>
+                            <span className="ms text-[#2a3a44] text-9xl">person</span>
                           </div>
                         )}
                         <div className="absolute inset-0" style={{ background: "linear-gradient(to top,#0b0f10 0%,transparent 55%)" }} />
+                        {/* Shot clock bar on image bottom */}
+                        {currentLot && !isSold && !isUnsold && (
+                          <div className="absolute bottom-0 left-0 right-0 h-1.5">
+                            <div
+                              className="h-full transition-all duration-100"
+                              style={{
+                                width: `${shotClock}%`,
+                                background: shotClockColor,
+                                boxShadow: `0 0 8px ${shotClockColor}`,
+                              }}
+                            />
+                          </div>
+                        )}
                       </div>
 
                       <div
                         className="absolute top-3 left-1/2 -translate-x-1/2 z-20 px-5 py-1 bg-[#e45d35] text-[#0b0f10] font-mono-geist text-[8px] font-bold tracking-[0.32em] uppercase rounded-full whitespace-nowrap"
                         style={{ boxShadow: "0 4px 16px rgba(228,93,53,0.45)" }}
                       >
-                        LOT #{currentLot?.lotNumber ?? lotNumber} • {isSold ? "SOLD" : isUnsold ? "UNSOLD" : "ON THE BLOCK"}
+                        LOT #{currentLot?.lotNumber ?? lotNumber} • {isSold ? "SOLD" : isUnsold ? "UNSOLD" : isLocked ? "LOCKED" : "ON THE BLOCK"}
                       </div>
                     </div>
 
@@ -666,7 +660,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                         </span>
                         <div className="w-[5px] h-[5px] rounded-full bg-[rgba(228,93,53,0.45)]" />
                         <span className="font-archivo text-[14px] sm:text-[17px] font-semibold text-white/80 tracking-[0.08em]">
-                          BASE: {fmtCR(currentLot?.basePrice)} <span className="text-[10px] opacity-60">CR</span>
+                          BASE: {fmtPts(currentLot?.basePrice)} <span className="text-[10px] opacity-60">CR</span>
                         </span>
                       </div>
                     </div>
@@ -702,26 +696,27 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                   <div className="absolute -top-8 -right-8 opacity-[0.05] pointer-events-none">
                     <span className="ms ms-fill text-white" style={{ fontSize: 220 }}>gavel</span>
                   </div>
-                  <div className="absolute -top-6 -right-6 w-[100px] h-[100px] bg-white/[0.03] rotate-45 rounded-xl pointer-events-none" />
 
                   <div className="text-center w-full relative z-10">
                     <span className="bid-label font-mono-geist text-[#e45d35] text-[10px] uppercase tracking-[0.35em] block mb-5 font-bold">
                       Current High Bid
                     </span>
                     <div className={`font-archivo text-fluid-bid leading-none font-medium tracking-[0.01em] text-[#e45d35] mb-[15px] tabular-nums ${bidPulse ? "bid-animate" : ""}`}>
-                      {fmtCR(currentLot?.currentBid)}
+                      {fmtPts(currentLot?.currentBid)}
                     </div>
-                    <div className="w-full h-1 bg-white/[0.05] rounded-full overflow-hidden mb-[15px] max-w-[200px] mx-auto relative">
-                      <div
-                        className={`absolute top-0 bottom-0 left-0 transition-all duration-100 ease-linear rounded-full ${shotClock < 25 ? "bg-red-500 animate-pulse" : "bg-[#e45d35]"}`}
-                        style={{ width: `${shotClock}%` }}
-                      />
-                    </div>
-                    {currentLot && !isSold && !isUnsold && (
+
+
+                    {currentLot && !isSold && !isUnsold && !isLocked && (
                       <p className="font-mono-geist text-[9px] text-[#5a6a74] uppercase tracking-widest mb-[15px]">
-                        Next bid: {fmtCR(nextBid)} CR
+                        Next bid: {fmtPts(nextBid)} CR
                       </p>
                     )}
+                    {isLocked && !isSold && !isUnsold && (
+                      <p className="font-mono-geist text-[9px] uppercase tracking-widest mb-[15px]" style={{ color: "#ef4444" }}>
+                        Bidding locked
+                      </p>
+                    )}
+
                     <div className="bid-divider w-full h-px mb-[30px]" style={{ background: "linear-gradient(to right,transparent,rgba(228,93,53,0.30),transparent)" }} />
                     <div className="flex items-center justify-center gap-3 sm:gap-4">
                       <div className="bid-leading-icon w-[58px] h-[58px] rounded-xl bg-[rgba(228,93,53,0.10)] border border-[rgba(228,93,53,0.20)] flex items-center justify-center">
@@ -777,7 +772,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                     <div className="flex flex-col items-end">
                       <span className="font-mono-geist text-[8px] text-[rgba(198,198,205,0.55)] uppercase tracking-[0.1em] mb-1">Remaining Purse</span>
                       <span className="font-archivo text-[15px] sm:text-[18px] font-semibold text-[#e45d35]">
-                        {fmtCR(winningPurse?.remaining ?? auction.rules.totalPoints)} <span className="text-[9px] opacity-50">CR</span>
+                        {fmtPts(winningPurse?.remaining ?? auction.rules.totalPoints)} <span className="text-[9px] opacity-50">CR</span>
                       </span>
                     </div>
                   </div>
@@ -790,10 +785,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                       {leaderTopBuy ? `${leaderTopBuy.playerName} — ${leaderTopBuy.currentBid.toLocaleString()} CR` : "—"}
                     </span>
                   </div>
-                  <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-white/[0.04]">
-                    <div className="h-full w-1/3 bg-[rgba(228,93,53,0.35)]" />
-                  </div>
-                  <div className="absolute -bottom-8 -right-8 w-[100px] h-[100px] rounded-full pointer-events-none" style={{ background: "rgba(228,93,53,0.05)", filter: "blur(24px)" }} />
                 </div>
               </aside>
             </div>
@@ -808,7 +799,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                 activeTeam={flowActiveTeam}
               />
 
-              {/* Player pool */}
               <aside ref={playerListRef} className="flow-pool col-span-3 h-full overflow-y-auto no-scrollbar px-6 py-6 z-10 border-r border-white/5">
                 <div className="flex flex-col space-y-3 pt-6 pb-20 relative">
                   <div className="flex items-center justify-between mb-4">
@@ -827,37 +817,33 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                   {flowPlayers.map((p) => {
                     const pAny      = p as any;
                     const status    = pAny.status as string;
-                    const isLocked  = status === "locked";
+                    const isLocked2 = status === "locked";
                     const isUnsoldP = status === "unsold";
                     const isSoldP   = status === "sold";
                     const isPending = status === "pending";
 
-                    const isHighlighted = hasSelection && !isLocked && !isUnsoldP
-                    ? (flowActivePlayer ? flowActivePlayer === String(p.id) : flowActiveTeam === pAny.teamShortCode)
-                    : false;
-                    const isDimmed = hasSelection && !isHighlighted && !isLocked;
+                    const isHighlighted = hasSelection && !isLocked2 && !isUnsoldP
+                      ? (flowActivePlayer ? flowActivePlayer === String(p.id) : flowActiveTeam === pAny.teamShortCode)
+                      : false;
+                    const isDimmed = hasSelection && !isHighlighted && !isLocked2;
 
                     return (
                       <div
                         key={p.id}
                         id={`player-${p.id}`}
-                        onClick={() => !isLocked && togglePlayer(p)}
+                        onClick={() => !isLocked2 && togglePlayer(p)}
                         className={[
                           "glass-panel p-3 rounded-xl flex items-center gap-3 transition-all duration-300 relative overflow-hidden",
-                          isLocked    ? "opacity-40 cursor-not-allowed" : "cursor-pointer",
+                          isLocked2   ? "opacity-40 cursor-not-allowed" : "cursor-pointer",
                           isHighlighted
                             ? "ring-1 ring-[#e45d35] shadow-[0_0_15px_rgba(228,93,53,0.3)] bg-white/10"
                             : "border border-white/5",
                           isDimmed    ? "opacity-30" : "",
-                          // unsold: subtle red-crossed left border
                           isUnsoldP && !isHighlighted ? "border-l-2 border-l-red-900/60" : "",
-                          // sold: green right border
                           isSoldP   && !isHighlighted ? "border-r-2 border-r-green-500/50" : "",
-                          // pending: orange glow border
                           isPending && !isHighlighted ? "border border-[#e45d35]/40" : "",
                         ].filter(Boolean).join(" ")}
                       >
-                        {/* Player image */}
                         <div className={[
                           "w-10 h-10 rounded-lg overflow-hidden flex-shrink-0",
                           isUnsoldP ? "grayscale opacity-40" : "bg-[#313536]",
@@ -867,8 +853,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                             : <div className="w-full h-full bg-[#313536]" />
                           }
                         </div>
-
-                        {/* Text */}
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <p className={[
@@ -877,13 +861,11 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                             ].join(" ")}>
                               {p.name}
                             </p>
-                            {/* Unsold badge */}
                             {isUnsoldP && (
                               <span className="shrink-0 font-mono-geist text-[7px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-red-950/60 text-red-500/70 border border-red-900/40">
                                 UNSOLD
                               </span>
                             )}
-                            {/* On block badge */}
                             {isPending && (
                               <span className="shrink-0 font-mono-geist text-[7px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded bg-[#e45d35]/15 text-[#e45d35] border border-[#e45d35]/30 animate-pulse">
                                 LIVE
@@ -898,13 +880,11 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                             "text-[#c6c6cd]",
                           ].join(" ")}>
                             {isSoldP   ? `SOLD • ${pAny.teamShortCode}` :
-                             isUnsoldP ? `BASE: ${pAny.price}`             :
+                             isUnsoldP ? `BASE: ${pAny.price}`          :
                              isPending ? "ON THE BLOCK"                 :
                              `BASE: ${pAny.price}`}
                           </p>
                         </div>
-
-                        {/* Unsold X overlay — subtle diagonal slash */}
                         {isUnsoldP && (
                           <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-xl opacity-20">
                             <div className="absolute top-0 left-0 w-full h-full"
@@ -920,7 +900,6 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
 
               <section className="flow-canvas-container col-span-6 flex flex-col relative z-0 pointer-events-none" />
 
-              {/* Franchises */}
               <aside ref={teamListRef} className="flow-franchises col-span-3 h-full overflow-y-auto no-scrollbar px-6 py-6 z-10 border-l border-white/5">
                 <div className="flex flex-col space-y-3 pt-6 pb-20 relative">
                   <div className="flex items-center justify-between mb-4">
@@ -937,7 +916,7 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
                   </div>
                   {flowTeams.map((t) => {
                     const isHighlighted = hasSelection ? flowActiveTeam === t.shortCode : false;
-                    const isDimmed = hasSelection && !isHighlighted;
+                    const isDimmed      = hasSelection && !isHighlighted;
                     return (
                       <div
                         key={t.id}
@@ -992,6 +971,21 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WRAPPER
+// ─────────────────────────────────────────────────────────────────────────────
+
+function WatchWithClock({ auctionId }: { auctionId: string }) {
+  const { auction } = useAuction();
+  const timerSeconds = auction?.session?.timerSeconds ?? 15;
+
+  return (
+    <ShotClockProvider timerSeconds={timerSeconds}>
+      <ScreenContent auctionId={auctionId} />
+    </ShotClockProvider>
+  );
+}
+
 export default function WatchPage({
   params,
 }: {
@@ -1000,7 +994,7 @@ export default function WatchPage({
   const { auctionId } = use(params);
   return (
     <AuctionProvider>
-      <ScreenContent auctionId={auctionId} />
+      <WatchWithClock auctionId={auctionId} />
     </AuctionProvider>
   );
 }
