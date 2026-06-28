@@ -45,6 +45,8 @@ export interface Player {
   capped:  boolean;
   img:     string;
   country: string;
+
+  
 }
 
 // ── Auction Rules ─────────────────────────────────────────────────────────────
