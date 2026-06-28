@@ -46,7 +46,9 @@ export interface Player {
   img:     string;
   country: string;
 
-  
+  lotOrder?: number;        // ← ADDED: for shuffling, null until shuffled
+
+
 }
 
 // ── Auction Rules ─────────────────────────────────────────────────────────────

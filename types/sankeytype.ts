@@ -1,11 +1,18 @@
-export type Player = {
-  id: string;
+// In @/types/sankeytype
+export interface Player {
+  id: number;
+  supabaseId?: string;
   name: string;
-  status: "locked" | "pending" | "sold" | "unsold"; // ← add "unsold"You said: full code  price: string;
-  teamShortCode: string | null;
-  img: string | null;
-};
-
+  role: string;
+  origin: string;
+  price: number; // Add this if it's missing
+  capped: boolean;
+  img: string;
+  country: string;
+  status?: 'locked' | 'sold' | 'pending' | 'unsold'; // Add this if it's missing
+  lotOrder?: number | null;
+  teamShortCode?: string | null; // Add this if it's missing
+}
 export type Team = {
   id: string;
   shortCode: string;

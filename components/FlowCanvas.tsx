@@ -30,11 +30,9 @@ export function FlowCanvas({ players, playerListRef, teamListRef, activePlayer, 
       const hasSelection = activePlayer !== null || activeTeam !== null;
 
       players.forEach(p => {
-        if (p.status !== 'sold' && p.status !== 'unsold') return; // ← include unsold
+        if (p.status !== 'sold' && p.status !== 'unsold') return;
 
-        // unsold players have no teamShortCode so skip the line drawing
-        // but we still want them visually distinct in the list — no line needed
-        if (p.status === 'unsold') return; // no flow line for unsold, just list styling
+        if (p.status === 'unsold') return;
 
         const playerEl = document.getElementById(`player-${p.id}`);
         const teamEl = document.getElementById(`team-${p.teamShortCode}`);
@@ -43,23 +41,26 @@ export function FlowCanvas({ players, playerListRef, teamListRef, activePlayer, 
           const pRect = playerEl.getBoundingClientRect();
           const tRect = teamEl.getBoundingClientRect();
 
-          // Check if elements are within visible scroll area
           const pVisible = pRect.top < pContRect.bottom && pRect.bottom > pContRect.top;
           const tVisible = tRect.top < tContRect.bottom && tRect.bottom > tContRect.top;
 
           if (pVisible || tVisible) {
-            // Absolute coordinates relative to the svg viewport to touch cards exactly
             const startX = pRect.right - svgRect.left;
             const startY = pRect.top + pRect.height / 2 - svgRect.top;
             
             const endX = tRect.left - svgRect.left;
             const endY = tRect.top + tRect.height / 2 - svgRect.top;
 
-            const isHighlighted = hasSelection ? (activePlayer ? activePlayer === p.id : activeTeam === p.teamShortCode) : false;
+            // FIX: Convert p.id to string for comparison
+            const isHighlighted = hasSelection 
+              ? (activePlayer !== null 
+                  ? activePlayer === String(p.id) 
+                  : activeTeam !== null && activeTeam === p.teamShortCode) 
+              : false;
             const isDimmed = hasSelection && !isHighlighted;
 
             newPaths.push({
-              id: p.id,
+              id: String(p.id), // Ensure id is string
               d: `M ${startX} ${startY} C ${startX + (endX - startX) * 0.4} ${startY}, ${startX + (endX - startX) * 0.6} ${endY}, ${endX} ${endY}`,
               highlighted: isHighlighted,
               dimmed: isDimmed
@@ -76,7 +77,7 @@ export function FlowCanvas({ players, playerListRef, teamListRef, activePlayer, 
        updateFlowLines();
        animationFrameId = requestAnimationFrame(loop);
     };
-    loop(); // Using requestAnimationFrame for fluid updates when scrolling rapidly
+    loop();
 
     return () => {
       cancelAnimationFrame(animationFrameId);
