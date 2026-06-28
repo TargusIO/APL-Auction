@@ -26,7 +26,7 @@ function buildFlowPlayer(overrides: {
   id: string; name: string; img: string; price: string;
   status: FlowPlayer["status"]; teamShortCode?: string | null;
 }): FlowPlayer {
-  return { ...AUCTION_CONFIG.players[0], ...overrides } as FlowPlayer;
+  return { ...AUCTION_CONFIG.players[0], ...overrides } as unknown as FlowPlayer;
 }
 
 function buildFlowTeam(overrides: {
