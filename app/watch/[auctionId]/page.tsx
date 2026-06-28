@@ -408,15 +408,15 @@ function ScreenContent({ auctionId }: { auctionId: string }) {
   }, [auction, teamPurses]);
 
   // Flow view handlers
-  const togglePlayer = (p: FlowPlayer) => {
-    if (flowActivePlayer === p.id) {
-      setFlowActivePlayer(null);
-      setFlowActiveTeam(null);
+    const togglePlayer = (p: FlowPlayer) => {
+    if (flowActivePlayer === String(p.id)) {
+        setFlowActivePlayer(null);
+        setFlowActiveTeam(null);
     } else {
-      setFlowActivePlayer(p.id);
-      setFlowActiveTeam((p as any).teamShortCode || null);
+        setFlowActivePlayer(String(p.id));
+        setFlowActiveTeam((p as any).teamShortCode || null);
     }
-  };
+    };
 
   const toggleTeam = (t: FlowTeam) => {
     if (flowActiveTeam === t.shortCode && !flowActivePlayer) {
