@@ -1,27 +1,35 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useParams } from "next/navigation";
 
 const NAV_ITEMS = [
-  { href: "/bid",     icon: "gavel",    label: "Auction" },
-  { href: "/squad",   icon: "groups",   label: "Squad"   },
-  { href: "/budget",  icon: "payments", label: "Budget"  },
-  { href: "/history", icon: "reorder",  label: "History" },
+  { segment: "bid",     icon: "gavel",    label: "Auction" },
+  { segment: "squad",   icon: "groups",   label: "Squad"   },
+  { segment: "budget",  icon: "payments", label: "Budget"  },
+  { segment: "history", icon: "reorder",  label: "History" },
 ];
 
 export default function InlineBottomNav() {
   const pathname = usePathname();
+  const params   = useParams();
+
+  const auctionId = params?.auctionId as string;
+  const teamCode  = params?.teamCode  as string;
+
+  const base = `/owner/${auctionId}/${teamCode}`;
+
   return (
     <nav className="shrink-0 flex justify-around items-center h-20 px-2
                     bg-[rgba(16,20,21,0.85)] backdrop-blur-2xl
                     border-t border-white/10">
       {NAV_ITEMS.map((item) => {
-        const active = pathname === item.href;
+        const href   = `${base}/${item.segment}`;
+        const active = pathname === href;
         return (
           <Link
-            key={item.href}
-            href={item.href}
+            key={href}
+            href={href}
             className={[
               "flex flex-col items-center justify-center gap-0.5 px-3 py-1 rounded-xl transition-all duration-300",
               active
