@@ -5,6 +5,10 @@ import MobileOnlyWrapper from "@/components/MobileOnlyWrapper";
 import BottomNavBar from "@/components/BottomNavBar";
 import { ShotClockProvider, useShotClock } from "@/context/ShotClockContext";
 import {
+  AuctionStatusOverlay,
+  type AuctionStatus,
+} from "@/components/OwnerAuctionStatusOverlay";
+import {
   loadLiveState,
   loadTeamPurses,
   subscribeToLot,
@@ -123,14 +127,16 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
 
   const { shotClock, isLocked, resetClock, freezeClock, pauseClock } = useShotClock();
 
-  const [team,        setTeam]        = useState<TeamInfo | null>(null);
-  const [rules,       setRules]       = useState<AuctionRules | null>(null);
-  const [currentLot,  setCurrentLot]  = useState<AuctionLot | null>(null);
-  const [bidHistory,  setBidHistory]  = useState<BidEntry[]>([]);
-  const [purse,       setPurse]       = useState(0);
-  const [roster,      setRoster]      = useState(0);
-  const [totalPoints, setTotalPoints] = useState(50000);
-  const [teamSize,    setTeamSize]    = useState(16);
+  const [team,          setTeam]          = useState<TeamInfo | null>(null);
+  const [rules,         setRules]         = useState<AuctionRules | null>(null);
+  const [currentLot,    setCurrentLot]    = useState<AuctionLot | null>(null);
+  const [bidHistory,    setBidHistory]    = useState<BidEntry[]>([]);
+  const [completedLots, setCompletedLots] = useState<AuctionLot[]>([]);
+  const [purse,         setPurse]         = useState(0);
+  const [roster,        setRoster]        = useState(0);
+  const [totalPoints,   setTotalPoints]   = useState(50000);
+  const [teamSize,      setTeamSize]      = useState(16);
+  const [auctionStatus, setAuctionStatus] = useState<AuctionStatus>("live");
 
   const [isSold,     setIsSold]     = useState(false);
   const [isUnsold,   setIsUnsold]   = useState(false);
@@ -139,17 +145,19 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
   const [bidSuccess, setBidSuccess] = useState(false);
   const [loading,    setLoading]    = useState(true);
 
-  const currentLotRef = useRef(currentLot);
-  const rulesRef      = useRef(rules);
-  const teamRef       = useRef(team);
-  const isLockedRef   = useRef(isLocked);   // ← NEW
-  const isPlacingRef  = useRef(isPlacing);  // ← NEW
+  const currentLotRef    = useRef(currentLot);
+  const rulesRef         = useRef(rules);
+  const teamRef          = useRef(team);
+  const isLockedRef      = useRef(isLocked);
+  const isPlacingRef     = useRef(isPlacing);
+  const auctionStatusRef = useRef(auctionStatus);
 
-  useEffect(() => { currentLotRef.current = currentLot; }, [currentLot]);
-  useEffect(() => { rulesRef.current      = rules;      }, [rules]);
-  useEffect(() => { teamRef.current       = team;       }, [team]);
-  useEffect(() => { isLockedRef.current   = isLocked;   }, [isLocked]);   // ← NEW
-  useEffect(() => { isPlacingRef.current  = isPlacing;  }, [isPlacing]);  // ← NEW
+  useEffect(() => { currentLotRef.current    = currentLot;    }, [currentLot]);
+  useEffect(() => { rulesRef.current         = rules;         }, [rules]);
+  useEffect(() => { teamRef.current          = team;          }, [team]);
+  useEffect(() => { isLockedRef.current      = isLocked;      }, [isLocked]);
+  useEffect(() => { isPlacingRef.current     = isPlacing;     }, [isPlacing]);
+  useEffect(() => { auctionStatusRef.current = auctionStatus; }, [auctionStatus]);
 
   // ── Load initial state ────────────────────────────────────────────────────
   useEffect(() => {
@@ -164,6 +172,7 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
         setRules(auctionState.rules);
         setTotalPoints(auctionState.rules.totalPoints);
         setTeamSize(auctionState.rules.teamSize);
+        setAuctionStatus(auctionState.status as AuctionStatus);
 
         const found = auctionState.teams.find(
           (t) => t.code.toLowerCase() === teamCode.toLowerCase()
@@ -183,6 +192,7 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
 
       setCurrentLot(liveData.currentLot);
       setBidHistory(liveData.bidHistory);
+      setCompletedLots(liveData.completedLots);
 
       if (liveData.currentLot?.status === "sold") {
         setIsSold(true);
@@ -234,29 +244,31 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
         setIsSold(true);
         setIsUnsold(false);
         freezeClock();
+        setCompletedLots((prev) => (prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]));
       }
       if (lot.status === "unsold") {
         setIsUnsold(true);
         setIsSold(false);
         freezeClock();
+        setCompletedLots((prev) => (prev.some((l) => l.id === lot.id) ? prev : [lot, ...prev]));
       }
     }, () => currentLotRef.current?.id ?? null);
 
-      const bidSub = subscribeToBids(auctionId, (bid) => {
-        if (bid.lotId !== currentLotRef.current?.id) return;
-        setBidHistory((prev) => [bid, ...prev].slice(0, 50));
-        setCurrentLot((prev) =>
-          prev
-            ? { ...prev, currentBid: bid.amount, winningTeamCode: bid.teamCode, winningTeamId: bid.teamId }
-            : prev
-        );
-        resetClock(bid.placedAt, true);   // ← force=true
-        if (flashRef.current) {
-          flashRef.current.classList.remove("animate-bid-flash");
-          void flashRef.current.offsetWidth;
-          flashRef.current.classList.add("animate-bid-flash");
-        }
-      });
+    const bidSub = subscribeToBids(auctionId, (bid) => {
+      if (bid.lotId !== currentLotRef.current?.id) return;
+      setBidHistory((prev) => [bid, ...prev].slice(0, 50));
+      setCurrentLot((prev) =>
+        prev
+          ? { ...prev, currentBid: bid.amount, winningTeamCode: bid.teamCode, winningTeamId: bid.teamId }
+          : prev
+      );
+      resetClock(bid.placedAt, true);
+      if (flashRef.current) {
+        flashRef.current.classList.remove("animate-bid-flash");
+        void flashRef.current.offsetWidth;
+        flashRef.current.classList.add("animate-bid-flash");
+      }
+    });
 
     const purseSub = subscribeToTeamPurses(auctionId, (teamId, remaining, newRoster) => {
       if (teamId === teamRef.current?.id) {
@@ -275,8 +287,18 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
   // ── Bid ───────────────────────────────────────────────────────────────────
   const handleBid = useCallback(async () => {
     const t = teamRef.current;
-    // Read from refs — never stale closures
     if (!currentLotRef.current || currentLotRef.current.status !== "pending" || isPlacingRef.current || !t) return;
+
+    if (auctionStatusRef.current !== "live") {
+      setBidError(
+        auctionStatusRef.current === "paused"
+          ? "Bidding is paused by the auctioneer."
+          : "This auction has ended."
+      );
+      setTimeout(() => setBidError(""), 3000);
+      return;
+    }
+
     if (isLockedRef.current) {
       setBidError("Time's up — awaiting auctioneer decision.");
       setTimeout(() => setBidError(""), 3000);
@@ -306,22 +328,29 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
     } finally {
       setIsPlacing(false);
     }
-  }, [auctionId, purse, resetClock]);  // ← isLocked and isPlacing removed, now read via refs
+  }, [auctionId, purse, resetClock]);
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const nextBid     = currentLot ? getNextBidAmount(currentLot.currentBid, rules?.tiers ?? []) : 0;
   const purgePct    = Math.min((purse / Math.max(totalPoints, 1)) * 100, 100);
   const isLeading   = !!team && currentLot?.winningTeamId === team.id;
   const isRevealing = currentLot?.status === "shuffling";
-  const canBid      =
+  const isPaused    = auctionStatus === "paused";
+  const isEnded     = auctionStatus === "completed";
+
+  // Bidding is only allowed when auction is live
+  const canBid =
     !!currentLot && currentLot.status === "pending" &&
+    auctionStatus === "live" &&
     !isPlacing && !isLocked && nextBid <= purse &&
     currentLot.winningTeamId !== team?.id;
 
   const fmt = (n: number) => n.toLocaleString();
 
   const bidLabel =
-    bidSuccess        ? "BID PLACED!"
+    isPaused          ? "AUCTION PAUSED"
+    : isEnded         ? "AUCTION ENDED"
+    : bidSuccess      ? "BID PLACED!"
     : isPlacing       ? "PLACING…"
     : !currentLot     ? "AWAITING LOT"
     : isRevealing     ? "AWAITING REVEAL"
@@ -333,11 +362,12 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
     : `PLACE BID — ${fmt(nextBid)} CR`;
 
   const bidIcon =
-    bidSuccess    ? "check_circle"
-    : isPlacing   ? "progress_activity"
-    : isRevealing ? "visibility_off"
-    : isLeading   ? "emoji_events"
-    : isLocked    ? "timer_off"
+    isPaused || isEnded ? "pause_circle"
+    : bidSuccess        ? "check_circle"
+    : isPlacing         ? "progress_activity"
+    : isRevealing       ? "visibility_off"
+    : isLeading         ? "emoji_events"
+    : isLocked          ? "timer_off"
     : "gavel";
 
   if (loading) {
@@ -351,13 +381,17 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
     );
   }
 
+  // ── KEY CHANGE: paused / completed renders inline in place of bid content.
+  // The outer shell (header + BottomNavBar) always stays visible.
+  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <div className="bg-[#0b0f10] text-[#e0e3e4] h-[100dvh] flex flex-col overflow-hidden"
-         style={{ fontFamily: "'Inter', sans-serif" }}>
-
+    <div
+      className="bg-[#0b0f10] text-[#e0e3e4] h-[100dvh] flex flex-col overflow-hidden"
+      style={{ fontFamily: "'Inter', sans-serif" }}
+    >
       <div ref={flashRef} className="fixed inset-0 pointer-events-none z-[999]" />
 
-      {/* ── HEADER ── */}
+      {/* ── HEADER ── always visible */}
       <header className="shrink-0 z-50 h-[56px] flex items-center justify-between px-4
                          bg-[rgba(11,15,16,0.92)] backdrop-blur-xl border-b border-white/[0.07]">
         <div className="flex items-center gap-3">
@@ -380,7 +414,7 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
         </div>
 
         <div className="flex items-center gap-2">
-          {isLeading && !isSold && !isUnsold && (
+          {isLeading && !isSold && !isUnsold && auctionStatus === "live" && (
             <div
               className="flex items-center gap-1.5 px-3 py-1 rounded-full"
               style={{ background: "rgba(228,93,53,0.15)", border: `1px solid ${BID_COLOR}50` }}
@@ -389,273 +423,321 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
               <span className="f-label text-[9px]" style={{ color: BID_COLOR }}>LEADING</span>
             </div>
           )}
-          <div className="flex items-center gap-1.5 px-3 py-1 rounded-full"
-               style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)" }}>
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="f-label text-[9px] text-[#c6c6cd]">LIVE</span>
+
+          {/* Status pill reflects real auction status */}
+          <div
+            className="flex items-center gap-1.5 px-3 py-1 rounded-full"
+            style={{
+              background: isPaused ? "rgba(245,158,11,0.12)" : isEnded ? "rgba(107,114,128,0.12)" : "rgba(34,197,94,0.08)",
+              border: `1px solid ${isPaused ? "rgba(245,158,11,0.3)" : isEnded ? "rgba(107,114,128,0.3)" : "rgba(34,197,94,0.2)"}`,
+            }}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${auctionStatus === "live" ? "bg-emerald-400 animate-pulse" : isPaused ? "bg-amber-400" : "bg-gray-400"}`}
+            />
+            <span
+              className="f-label text-[9px]"
+              style={{ color: isPaused ? "#fbbf24" : isEnded ? "#9ca3af" : "#34d399" }}
+            >
+              {auctionStatus.toUpperCase()}
+            </span>
           </div>
         </div>
       </header>
 
-      {/* ── SNAP SCROLL BODY ── */}
-      <div ref={scrollRef} className="snap-scroll flex-1 min-h-0 pb-[72px]">
+      {/* ── CONTENT AREA — switches between bid room and status block ── */}
+      {/* BottomNavBar pb spacer is always present below */}
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden" style={{ paddingBottom: 68 }}>
 
-        {/* ══ PAGE 1: Player card ══ */}
-        <div className="snap-target flex flex-col gap-3 p-3"
-             style={{ height: "calc(100dvh - 56px - 72px)" }}>
-          <PlayerCard lot={currentLot} isSold={isSold} isUnsold={isUnsold} isRevealing={isRevealing} />
-          <button
-            onClick={() => {
-              if (!scrollRef.current || !bidCardRef.current) return;
-              const top =
-                bidCardRef.current.getBoundingClientRect().top -
-                scrollRef.current.getBoundingClientRect().top +
-                scrollRef.current.scrollTop;
-              scrollRef.current.scrollTo({ top, behavior: "smooth" });
-            }}
-            className="shrink-0 flex flex-col items-center gap-0.5 py-1 w-full"
-            style={{ opacity: 0.4 }}
-          >
-            <span className="f-label text-[#c6c6cd] text-[9px]">PLACE BID</span>
-            <span className="ms text-[#c6c6cd] text-lg">expand_more</span>
-          </button>
-        </div>
+        {/* PAUSED or COMPLETED: render inline status block, hide bid content */}
+        {(isPaused || isEnded) ? (
+          <AuctionStatusOverlay
+            auctionId={auctionId}
+            initialStatus={auctionStatus}
+            onStatusChange={setAuctionStatus}
+            accentColor={team?.color ?? BID_COLOR}
+            purse={purse}
+            roster={roster}
+            teamSize={teamSize}
+            totalPoints={totalPoints}
+          />
+        ) : (
+          /* LIVE: normal bid room content */
+          <>
+            {/* We still need the overlay subscribed for status changes even
+                when live, but we render null — the hook inside runs */}
+            <AuctionStatusOverlay
+              auctionId={auctionId}
+              initialStatus={auctionStatus}
+              onStatusChange={setAuctionStatus}
+            />
 
-        {/* ══ PAGE 2: Bid controls ══ */}
-        <div className="snap-target flex flex-col gap-3 p-3"
-             style={{ height: "calc(100dvh - 56px - 72px)" }}>
+            <div ref={scrollRef} className="snap-scroll flex-1 min-h-0">
 
-          {/* ── Current bid card ── */}
-          <div
-            ref={bidCardRef}
-            className="glass-hot rounded-2xl px-5 pt-5 pb-4 shrink-0 relative overflow-hidden"
-          >
-            <div className="absolute -bottom-4 -right-4 pointer-events-none opacity-[0.04]">
-              <span className="ms ms-fill text-white" style={{ fontSize: 160 }}>gavel</span>
-            </div>
-
-            <p className="f-label text-[10px] text-[#5a6a74] mb-1">CURRENT HIGH BID</p>
-
-            <div className="flex items-end gap-2 mb-1">
-              <span
-                className={`f-display leading-none ${currentLot && !isLocked && !isSold && !isUnsold && !isRevealing ? "animate-pulse-bid" : ""}`}
-                style={{
-                  fontSize: "clamp(72px, 18vw, 96px)",
-                  color: isSold ? BID_COLOR : isUnsold ? "#6b7280" : (isLocked || isRevealing) ? "#374151" : BID_COLOR,
-                }}
-              >
-                {currentLot && !isRevealing ? fmt(currentLot.currentBid) : "—"}
-              </span>
-              <span className="f-label text-[11px] text-[#5a6a74] mb-3">CR</span>
-            </div>
-
-            {isRevealing && (
-              <p className="f-label text-[10px] text-[#e45d35] animate-timer-pulse mb-3">
-                AWAITING REVEAL ON BROADCAST SCREEN…
-              </p>
-            )}
-
-            {isLocked && !isRevealing && !isSold && !isUnsold && (
-              <p className="f-label text-[10px] text-red-400 animate-timer-pulse mb-3">
-                TIME'S UP — AWAITING AUCTIONEER DECISION
-              </p>
-            )}
-
-            <div className="w-full h-px mb-3"
-                 style={{ background: "linear-gradient(to right, transparent, rgba(228,93,53,0.25), transparent)" }} />
-
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-                     style={{ background: "rgba(228,93,53,0.12)", border: `1px solid ${BID_COLOR}25` }}>
-                  <span className="ms ms-fill text-[16px]" style={{ color: BID_COLOR }}>groups</span>
-                </div>
-                <div>
-                  <p className="f-label-sm text-[8px] text-[#5a6a74]">LEADER</p>
-                  <p className="f-display text-[18px] text-white leading-none" style={{ fontStyle: "normal" }}>
-                    {isRevealing ? "—" : (currentLot?.winningTeamCode ?? "—")}
-                  </p>
-                </div>
-              </div>
-
-              {currentLot && !isSold && !isUnsold && !isRevealing && !isLocked && !isLeading && (
-                <div className="text-right">
-                  <p className="f-label-sm text-[8px] text-[#5a6a74]">NEXT BID</p>
-                  <p className="f-num text-[18px]" style={{ color: BID_COLOR }}>{fmt(nextBid)} CR</p>
-                </div>
-              )}
-              {isLeading && !isSold && !isUnsold && !isRevealing && !isLocked && (
-                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg"
-                     style={{ background: "rgba(228,93,53,0.10)", border: `1px solid ${BID_COLOR}25` }}>
-                  <span className="ms ms-fill text-[14px]" style={{ color: BID_COLOR }}>emoji_events</span>
-                  <span className="f-label text-[9px]" style={{ color: BID_COLOR }}>YOU'RE LEADING</span>
-                </div>
-              )}
-              {isSold && <span className="f-display text-[18px]" style={{ color: BID_COLOR }}>SOLD</span>}
-              {isUnsold && <span className="f-display text-[18px] text-gray-400">UNSOLD</span>}
-              {isRevealing && (
-                <div className="flex items-center gap-1.5 text-[#e45d35]">
-                  <span className="ms ms-fill text-[18px] animate-spin">autorenew</span>
-                  <span className="f-label text-[10px]">REVEALING</span>
-                </div>
-              )}
-              {isLocked && !isSold && !isUnsold && !isRevealing && (
-                <div className="flex items-center gap-1.5 text-red-400">
-                  <span className="ms ms-bold text-[18px]">timer_off</span>
-                  <span className="f-label text-[10px]">LOCKED</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* ── Budget Health ── */}
-          <div className="glass rounded-xl px-4 pt-3 pb-4 shrink-0">
-            <p className="f-label text-[10px] text-[#5a6a74] mb-3">BUDGET HEALTH</p>
-            <div className="mb-3">
-              <div className="flex justify-between items-baseline mb-1.5">
-                <span className="f-label-sm text-[9px] text-[#7a8a94]">PURSE REMAINING</span>
-                <span className="f-num text-[15px] text-white">
-                  {fmt(purse)} <span className="text-[#5a6a74] text-[11px] font-normal">/ {fmt(totalPoints)}</span>
-                </span>
-              </div>
-              <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
-                <div
-                  className="h-full rounded-full transition-all duration-500"
-                  style={{
-                    width: `${purgePct}%`,
-                    background: purgePct < 25 ? "#ef4444" : BID_COLOR,
-                    boxShadow: `0 0 10px ${purgePct < 25 ? "#ef444460" : `${BID_COLOR}60`}`,
-                  }}
+              {/* ══ PAGE 1: Player card ══ */}
+              <div className="snap-target flex flex-col gap-3 p-3"
+                   style={{ height: "calc(100dvh - 56px - 68px)" }}>
+                <PlayerCard
+                  lot={currentLot}
+                  isSold={isSold}
+                  isUnsold={isUnsold}
+                  isRevealing={isRevealing}
+                  completedCount={completedLots.length}
                 />
+                <button
+                  onClick={() => {
+                    if (!scrollRef.current || !bidCardRef.current) return;
+                    const top =
+                      bidCardRef.current.getBoundingClientRect().top -
+                      scrollRef.current.getBoundingClientRect().top +
+                      scrollRef.current.scrollTop;
+                    scrollRef.current.scrollTo({ top, behavior: "smooth" });
+                  }}
+                  className="shrink-0 flex flex-col items-center gap-0.5 py-1 w-full"
+                  style={{ opacity: 0.4 }}
+                >
+                  <span className="f-label text-[#c6c6cd] text-[9px]">PLACE BID</span>
+                  <span className="ms text-[#c6c6cd] text-lg">expand_more</span>
+                </button>
               </div>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="f-label-sm text-[9px] text-[#7a8a94]">SQUAD FILLED</span>
-              <span className="f-num text-[20px] text-white">
-                {roster} <span className="text-[#5a6a74] text-[14px] font-normal">/ {teamSize}</span>
-              </span>
-            </div>
-          </div>
 
-          {/* ── Error ── */}
-          {bidError && (
-            <div className="shrink-0 px-4 py-3 rounded-xl animate-slide-up"
-                 style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
-              <p className="f-label text-[10px] text-red-400">{bidError}</p>
-            </div>
-          )}
+              {/* ══ PAGE 2: Bid controls ══ */}
+              <div className="snap-target flex flex-col gap-3 p-3"
+                   style={{ height: "calc(100dvh - 56px - 68px)" }}>
 
-          {/* ── BID BUTTON ── */}
-          <button
-            onClick={handleBid}
-            disabled={!canBid}
-            className="shrink-0 w-full py-[18px] rounded-xl flex items-center justify-center gap-3
-                       active:scale-[0.97] transition-all duration-150
-                       disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{
-              background:
-                bidSuccess    ? "#22c55e"
-                : isLeading   ? "#0f1f0f"
-                : (isLocked || isRevealing) ? "#1a0a08"
-                : canBid      ? BID_COLOR
-                : "#1a1e1f",
-              boxShadow:
-                canBid && !isLocked && !isLeading && !isRevealing
-                  ? `0 6px 32px ${BID_COLOR}50`
-                  : "none",
-              border:
-                isLeading             ? `1px solid ${BID_COLOR}30`
-                : (isLocked || isRevealing) ? "1px solid rgba(239,68,68,0.3)"
-                : "none",
-            }}
-          >
-            <span className={`ms ms-fill text-[22px] text-white ${isPlacing ? "animate-spin" : (isLocked || isRevealing) ? "animate-timer-pulse" : ""}`}>
-              {bidIcon}
-            </span>
-            <span className="f-display text-[17px] text-white" style={{ fontStyle: "normal", letterSpacing: "0.04em" }}>
-              {bidLabel}
-            </span>
-          </button>
+                {/* ── Current bid card ── */}
+                <div
+                  ref={bidCardRef}
+                  className="glass-hot rounded-2xl px-5 pt-5 pb-4 shrink-0 relative overflow-hidden"
+                >
+                  <div className="absolute -bottom-4 -right-4 pointer-events-none opacity-[0.04]">
+                    <span className="ms ms-fill text-white" style={{ fontSize: 160 }}>gavel</span>
+                  </div>
 
-          {/* ── Bid History ── */}
-          <div className="flex-1 min-h-0 glass rounded-xl overflow-hidden flex flex-col">
-            <div className="shrink-0 px-4 py-3 border-b border-white/[0.06] flex justify-between items-center"
-                 style={{ background: "rgba(16,20,21,0.60)" }}>
-              <p className="f-label text-[10px] text-[#c6c6cd]">BID HISTORY</p>
-              <div className="flex items-center gap-1.5">
-                <span className="relative flex h-1.5 w-1.5">
-                  <span className="animate-ping-ring absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                </span>
-                <span className="f-label text-[9px] text-[#c6c6cd]">LIVE</span>
-              </div>
-            </div>
+                  <p className="f-label text-[10px] text-[#5a6a74] mb-1">CURRENT HIGH BID</p>
 
-            <div className="bid-history-scroll flex-1 min-h-0 divide-y divide-white/[0.04]">
-              {bidHistory.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full gap-3 py-8">
-                  <span className="ms text-[#2a3a44] text-4xl">gavel</span>
-                  <p className="f-label text-[9px] text-[#3a4a54]">NO BIDS YET</p>
-                </div>
-              ) : (
-                bidHistory.map((bid, i) => {
-                  const isMe  = bid.teamId === team?.id;
-                  const isTop = i === 0;
-                  return (
-                    <div
-                      key={bid.id}
-                      className={`px-4 py-3 flex items-center justify-between transition-colors
-                        ${isTop ? "animate-slide-up" : ""}
-                        ${isMe ? "" : "hover:bg-white/[0.02]"}`}
-                      style={isMe ? { background: "rgba(228,93,53,0.05)" } : {}}
+                  <div className="flex items-end gap-2 mb-1">
+                    <span
+                      className={`f-display leading-none ${currentLot && !isLocked && !isSold && !isUnsold && !isRevealing ? "animate-pulse-bid" : ""}`}
+                      style={{
+                        fontSize: "clamp(72px, 18vw, 96px)",
+                        color: isSold ? BID_COLOR : isUnsold ? "#6b7280" : isLocked || isRevealing ? "#374151" : BID_COLOR,
+                      }}
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
-                          style={{
-                            background: isMe ? `${BID_COLOR}18` : "rgba(255,255,255,0.05)",
-                            border: isMe ? `1px solid ${BID_COLOR}35` : "1px solid rgba(255,255,255,0.07)",
-                          }}
-                        >
-                          <span className="f-display text-[11px]"
-                                style={{ color: isMe ? BID_COLOR : "#c6c6cd", fontStyle: "normal" }}>
-                            {bid.teamCode.slice(0, 2)}
-                          </span>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <p className={`f-body text-[13px] font-semibold truncate ${isMe ? "text-white" : "text-[#c6c6cd]"}`}>
-                              {bid.teamName}
-                            </p>
-                            {isMe && (
-                              <span className="f-label text-[8px] px-1.5 py-0.5 rounded shrink-0"
-                                    style={{ background: `${BID_COLOR}18`, color: BID_COLOR, border: `1px solid ${BID_COLOR}30` }}>
-                                YOU
-                              </span>
-                            )}
-                          </div>
-                          <p className="f-label-sm text-[8px] text-[#3a4a54] mt-0.5">
-                            {new Date(bid.placedAt).toLocaleTimeString([], {
-                              hour: "2-digit", minute: "2-digit", second: "2-digit",
-                            })}
-                          </p>
-                        </div>
+                      {currentLot && !isRevealing ? fmt(currentLot.currentBid) : "—"}
+                    </span>
+                    <span className="f-label text-[11px] text-[#5a6a74] mb-3">CR</span>
+                  </div>
+
+                  {isRevealing && (
+                    <p className="f-label text-[10px] text-[#e45d35] animate-timer-pulse mb-3">
+                      AWAITING REVEAL ON BROADCAST SCREEN…
+                    </p>
+                  )}
+
+                  {isLocked && !isRevealing && !isSold && !isUnsold && (
+                    <p className="f-label text-[10px] text-red-400 animate-timer-pulse mb-3">
+                      TIME'S UP — AWAITING AUCTIONEER DECISION
+                    </p>
+                  )}
+
+                  <div className="w-full h-px mb-3"
+                       style={{ background: "linear-gradient(to right, transparent, rgba(228,93,53,0.25), transparent)" }} />
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                           style={{ background: "rgba(228,93,53,0.12)", border: `1px solid ${BID_COLOR}25` }}>
+                        <span className="ms ms-fill text-[16px]" style={{ color: BID_COLOR }}>groups</span>
                       </div>
-                      <span
-                        className="f-num text-[16px] shrink-0 tabular-nums"
-                        style={{ color: isTop ? BID_COLOR : isMe ? `${BID_COLOR}bb` : "#e0e3e4" }}
-                      >
-                        {fmt(bid.amount)}
+                      <div>
+                        <p className="f-label-sm text-[8px] text-[#5a6a74]">LEADER</p>
+                        <p className="f-display text-[18px] text-white leading-none" style={{ fontStyle: "normal" }}>
+                          {isRevealing ? "—" : (currentLot?.winningTeamCode ?? "—")}
+                        </p>
+                      </div>
+                    </div>
+
+                    {currentLot && !isSold && !isUnsold && !isRevealing && !isLocked && !isLeading && (
+                      <div className="text-right">
+                        <p className="f-label-sm text-[8px] text-[#5a6a74]">NEXT BID</p>
+                        <p className="f-num text-[18px]" style={{ color: BID_COLOR }}>{fmt(nextBid)} CR</p>
+                      </div>
+                    )}
+                    {isLeading && !isSold && !isUnsold && !isRevealing && !isLocked && (
+                      <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg"
+                           style={{ background: "rgba(228,93,53,0.10)", border: `1px solid ${BID_COLOR}25` }}>
+                        <span className="ms ms-fill text-[14px]" style={{ color: BID_COLOR }}>emoji_events</span>
+                        <span className="f-label text-[9px]" style={{ color: BID_COLOR }}>YOU'RE LEADING</span>
+                      </div>
+                    )}
+                    {isSold && <span className="f-display text-[18px]" style={{ color: BID_COLOR }}>SOLD</span>}
+                    {isUnsold && <span className="f-display text-[18px] text-gray-400">UNSOLD</span>}
+                    {isRevealing && (
+                      <div className="flex items-center gap-1.5 text-[#e45d35]">
+                        <span className="ms ms-fill text-[18px] animate-spin">autorenew</span>
+                        <span className="f-label text-[10px]">REVEALING</span>
+                      </div>
+                    )}
+                    {isLocked && !isSold && !isUnsold && !isRevealing && (
+                      <div className="flex items-center gap-1.5 text-red-400">
+                        <span className="ms ms-bold text-[18px]">timer_off</span>
+                        <span className="f-label text-[10px]">LOCKED</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Budget Health ── */}
+                <div className="glass rounded-xl px-4 pt-3 pb-4 shrink-0">
+                  <p className="f-label text-[10px] text-[#5a6a74] mb-3">BUDGET HEALTH</p>
+                  <div className="mb-3">
+                    <div className="flex justify-between items-baseline mb-1.5">
+                      <span className="f-label-sm text-[9px] text-[#7a8a94]">PURSE REMAINING</span>
+                      <span className="f-num text-[15px] text-white">
+                        {fmt(purse)} <span className="text-[#5a6a74] text-[11px] font-normal">/ {fmt(totalPoints)}</span>
                       </span>
                     </div>
-                  );
-                })
-              )}
+                    <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{
+                          width: `${purgePct}%`,
+                          background: purgePct < 25 ? "#ef4444" : BID_COLOR,
+                          boxShadow: `0 0 10px ${purgePct < 25 ? "#ef444460" : `${BID_COLOR}60`}`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="f-label-sm text-[9px] text-[#7a8a94]">SQUAD FILLED</span>
+                    <span className="f-num text-[20px] text-white">
+                      {roster} <span className="text-[#5a6a74] text-[14px] font-normal">/ {teamSize}</span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* ── Error ── */}
+                {bidError && (
+                  <div className="shrink-0 px-4 py-3 rounded-xl animate-slide-up"
+                       style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                    <p className="f-label text-[10px] text-red-400">{bidError}</p>
+                  </div>
+                )}
+
+                {/* ── BID BUTTON ── */}
+                <button
+                  onClick={handleBid}
+                  disabled={!canBid}
+                  className="shrink-0 w-full py-[18px] rounded-xl flex items-center justify-center gap-3
+                             active:scale-[0.97] transition-all duration-150
+                             disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{
+                    background:
+                      bidSuccess  ? "#22c55e"
+                      : isLeading ? "#0f1f0f"
+                      : isLocked || isRevealing ? "#1a0a08"
+                      : canBid    ? BID_COLOR
+                      : "#1a1e1f",
+                    boxShadow:
+                      canBid && !isLocked && !isLeading && !isRevealing
+                        ? `0 6px 32px ${BID_COLOR}50`
+                        : "none",
+                    border:
+                      isLeading            ? `1px solid ${BID_COLOR}30`
+                      : isLocked || isRevealing ? "1px solid rgba(239,68,68,0.3)"
+                      : "none",
+                  }}
+                >
+                  <span className={`ms ms-fill text-[22px] text-white ${isPlacing ? "animate-spin" : isLocked || isRevealing ? "animate-timer-pulse" : ""}`}>
+                    {bidIcon}
+                  </span>
+                  <span className="f-display text-[17px] text-white" style={{ fontStyle: "normal", letterSpacing: "0.04em" }}>
+                    {bidLabel}
+                  </span>
+                </button>
+
+                {/* ── Bid History ── */}
+                <div className="flex-1 min-h-0 glass rounded-xl overflow-hidden flex flex-col">
+                  <div className="shrink-0 px-4 py-3 border-b border-white/[0.06] flex justify-between items-center"
+                       style={{ background: "rgba(16,20,21,0.60)" }}>
+                    <p className="f-label text-[10px] text-[#c6c6cd]">BID HISTORY</p>
+                    <div className="flex items-center gap-1.5">
+                      <span className="relative flex h-1.5 w-1.5">
+                        <span className="animate-ping-ring absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                      </span>
+                      <span className="f-label text-[9px] text-[#c6c6cd]">LIVE</span>
+                    </div>
+                  </div>
+
+                  <div className="bid-history-scroll flex-1 min-h-0 divide-y divide-white/[0.04]">
+                    {bidHistory.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center h-full gap-3 py-8">
+                        <span className="ms text-[#2a3a44] text-4xl">gavel</span>
+                        <p className="f-label text-[9px] text-[#3a4a54]">NO BIDS YET</p>
+                      </div>
+                    ) : (
+                      bidHistory.map((bid, i) => {
+                        const isMe  = bid.teamId === team?.id;
+                        const isTop = i === 0;
+                        return (
+                          <div
+                            key={bid.id}
+                            className={`px-4 py-3 flex items-center justify-between transition-colors ${isTop ? "animate-slide-up" : ""}`}
+                            style={isMe ? { background: "rgba(228,93,53,0.05)" } : {}}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div
+                                className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                                style={{
+                                  background: isMe ? `${BID_COLOR}18` : "rgba(255,255,255,0.05)",
+                                  border: isMe ? `1px solid ${BID_COLOR}35` : "1px solid rgba(255,255,255,0.07)",
+                                }}
+                              >
+                                <span className="f-display text-[11px]"
+                                      style={{ color: isMe ? BID_COLOR : "#c6c6cd", fontStyle: "normal" }}>
+                                  {bid.teamCode.slice(0, 2)}
+                                </span>
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <p className={`f-body text-[13px] font-semibold truncate ${isMe ? "text-white" : "text-[#c6c6cd]"}`}>
+                                    {bid.teamName}
+                                  </p>
+                                  {isMe && (
+                                    <span className="f-label text-[8px] px-1.5 py-0.5 rounded shrink-0"
+                                          style={{ background: `${BID_COLOR}18`, color: BID_COLOR, border: `1px solid ${BID_COLOR}30` }}>
+                                      YOU
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="f-label-sm text-[8px] text-[#3a4a54] mt-0.5">
+                                  {new Date(bid.placedAt).toLocaleTimeString([], {
+                                    hour: "2-digit", minute: "2-digit", second: "2-digit",
+                                  })}
+                                </p>
+                              </div>
+                            </div>
+                            <span
+                              className="f-num text-[16px] shrink-0 tabular-nums"
+                              style={{ color: isTop ? BID_COLOR : isMe ? `${BID_COLOR}bb` : "#e0e3e4" }}
+                            >
+                              {fmt(bid.amount)}
+                            </span>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </div>
 
+      {/* ── BOTTOM NAV — always visible regardless of auction status ── */}
       <BottomNavBar />
     </div>
   );
@@ -665,17 +747,30 @@ function BidRoom({ auctionId, teamCode }: { auctionId: string; teamCode: string 
 // PLAYER CARD
 // ─────────────────────────────────────────────────────────────────────────────
 function PlayerCard({
-  lot, isSold, isUnsold, isRevealing,
+  lot, isSold, isUnsold, isRevealing, completedCount,
 }: {
-  lot: AuctionLot | null; isSold: boolean; isUnsold: boolean; isRevealing: boolean;
+  lot: AuctionLot | null;
+  isSold: boolean;
+  isUnsold: boolean;
+  isRevealing: boolean;
+  completedCount: number;
 }) {
   if (!lot) {
+    const hasStarted = completedCount > 0;
     return (
       <section className="glass rounded-xl flex-1 min-h-0 flex flex-col items-center justify-center gap-4">
-        <span className="ms text-[#2a3a44]" style={{ fontSize: 56 }}>hourglass_empty</span>
+        <span className="ms text-[#2a3a44]" style={{ fontSize: 56 }}>
+          {hasStarted ? "pending" : "hourglass_empty"}
+        </span>
         <div className="text-center">
-          <p className="f-display text-[22px] text-white mb-1">AWAITING LOT</p>
-          <p className="f-label text-[9px] text-[#3a4a54]">AUCTIONEER HASN'T STARTED YET</p>
+          <p className="f-display text-[22px] text-white mb-1">
+            {hasStarted ? "NEXT LOT SOON" : "AWAITING LOT"}
+          </p>
+          <p className="f-label text-[9px] text-[#3a4a54]">
+            {hasStarted
+              ? `${completedCount} LOT${completedCount !== 1 ? "S" : ""} COMPLETED — STAY READY`
+              : "AUCTIONEER HASN'T STARTED YET"}
+          </p>
         </div>
       </section>
     );
@@ -774,7 +869,7 @@ function PlayerCard({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CLOCK WRAPPER — loads timerSeconds before mounting ShotClockProvider
+// CLOCK WRAPPER
 // ─────────────────────────────────────────────────────────────────────────────
 function BidRoomWithClock({ auctionId, teamCode }: { auctionId: string; teamCode: string }) {
   const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
@@ -785,7 +880,7 @@ function BidRoomWithClock({ auctionId, teamCode }: { auctionId: string; teamCode
       .catch(() => setTimerSeconds(15));
   }, [auctionId]);
 
-  if (timerSeconds === null) return null;   // ← wait before mounting
+  if (timerSeconds === null) return null;
 
   return (
     <ShotClockProvider timerSeconds={timerSeconds}>
@@ -793,6 +888,7 @@ function BidRoomWithClock({ auctionId, teamCode }: { auctionId: string; teamCode
     </ShotClockProvider>
   );
 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ROOT
 // ─────────────────────────────────────────────────────────────────────────────

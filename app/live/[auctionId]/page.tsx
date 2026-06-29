@@ -1,15 +1,13 @@
-// app/live/[auctionId]/page.tsx
 "use client";
 
 import React, { use, useCallback, useEffect, useRef, useState } from "react";
 import { AuctionProvider, useAuction } from "@/context/AuctionContext";
 import { ShotClockProvider, useShotClock } from "@/context/ShotClockContext";
 import { AuctionStamp } from "@/components/AuctionStamp";
+import { AuctionStatusGate } from "@/components/AuctionStatusGate";
 import DesktopOnlyWrapper from "@/components/DesktopOnlyWrapper";
 import {
   loadLiveState,
-  startLot,
-  placeBid,
   closeLotSold,
   closeLotUnsold,
   subscribeToLot,
@@ -22,6 +20,7 @@ import {
 } from "@/lib/auctionLiveDb";
 import { ensureTeamPurses, fmtPts, type TeamPurse } from "@/lib/auctionLiveUtils";
 import type { Player } from "@/types/auction";
+import { FeedbackModal } from "@/components/FeedbackModal";
 
 type SoldState = "pending" | "sold" | "unsold";
 
@@ -43,25 +42,35 @@ let particleIdCtr = 0;
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AuctioneerContent({ auctionId }: { auctionId: string }) {
-  const { auction, loadFromDb, handleStop, shuffleReady, handleShuffle } = useAuction();
-  const { shotClock, isLocked, resetClock, freezeClock, pauseClock }    = useShotClock();
+  const {
+    auction,
+    loadFromDb,
+    handleStop,
+    handlePause,
+    handleResume,
+    shuffleReady,
+    handleShuffle,
+  } = useAuction();
+  const { shotClock, isLocked, resetClock, freezeClock, pauseClock } = useShotClock();
 
-  const [loading,         setLoading]        = useState(true);
-  const [currentLot,      setCurrentLot]     = useState<AuctionLot | null>(null);
-  const [bidHistory,      setBidHistory]     = useState<BidEntry[]>([]);
-  const [completedLots,   setCompletedLots]  = useState<AuctionLot[]>([]);
-  const [lotNumber,       setLotNumber]      = useState(0);
-  const [teamPurses,      setTeamPurses]     = useState<Record<string, TeamPurse>>({});
-  const [playerQueue,     setPlayerQueue]    = useState<Player[]>([]);
+  const [loading,         setLoading]         = useState(true);
+  const [currentLot,      setCurrentLot]      = useState<AuctionLot | null>(null);
+  const [bidHistory,      setBidHistory]      = useState<BidEntry[]>([]);
+  const [completedLots,   setCompletedLots]   = useState<AuctionLot[]>([]);
+  const [lotNumber,       setLotNumber]       = useState(0);
+  const [teamPurses,      setTeamPurses]      = useState<Record<string, TeamPurse>>({});
+  const [playerQueue,     setPlayerQueue]     = useState<Player[]>([]);
 
-  const [soldState,       setSoldState]      = useState<SoldState>("pending");
-  const [isShuffling,     setIsShuffling]    = useState(false); // lot is in "shuffling" phase
-  const [flashActive,     setFlashActive]    = useState(false);
-  const [glowActive,      setGlowActive]     = useState(false);
-  const [particles,       setParticles]      = useState<Particle[]>([]);
-  const [actionError,     setActionError]    = useState<string | null>(null);
-  const [isBusy,          setIsBusy]         = useState(false);
+  const [soldState,       setSoldState]       = useState<SoldState>("pending");
+  const [isShuffling,     setIsShuffling]     = useState(false);
+  const [flashActive,     setFlashActive]     = useState(false);
+  const [glowActive,      setGlowActive]      = useState(false);
+  const [particles,       setParticles]       = useState<Particle[]>([]);
+  const [actionError,     setActionError]     = useState<string | null>(null);
+  const [isBusy,          setIsBusy]          = useState(false);
   const [isShufflingPool, setIsShufflingPool] = useState(false);
+  const [showFeedback,    setShowFeedback]    = useState(false);
+  const [feedbackTrigger, setFeedbackTrigger] = useState<"paused" | "completed">("completed");
 
   const flashTimeout  = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentLotRef = useRef(currentLot);
@@ -100,7 +109,6 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
       setLotNumber(liveData.lotNumber);
 
       if (liveData.currentLot?.status === "shuffling") {
-        // Watch page is animating — show "Revealing" state, no clock yet
         setIsShuffling(true);
         pauseClock();
       } else if (liveData.currentLot?.status === "sold") {
@@ -136,7 +144,6 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
       setCurrentLot(lot);
 
       if (lot.status === "shuffling") {
-        // New lot just created — watch page is animating, block controls
         if (isNewLot) {
           setPlayerQueue((prev) => prev.filter((p) => p.supabaseId !== lot.playerId));
           setBidHistory([]);
@@ -149,10 +156,8 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
       }
 
       if (lot.status === "pending") {
-        // Watch page finished animation — clock starts now
         setIsShuffling(false);
         if (isNewLot || currentLotRef.current?.status === "shuffling") {
-          // startedAt can be null; normalize to undefined to satisfy resetClock typing
           resetClock(lot.startedAt ?? undefined);
         }
         setSoldState("pending");
@@ -191,17 +196,17 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
       }
     }, getCurrentLotId);
 
-  const bidSub = subscribeToBids(auctionId, (bid) => {
-    console.log('[watch] bid event received, lotId=', bid.lotId, 'currentLot=', currentLotRef.current?.id);
-    if (bid.lotId !== currentLotRef.current?.id) return;
-    console.log('[watch] calling resetClock');
-    setBidHistory((prev) => [bid, ...prev].slice(0, 30));
+    const bidSub = subscribeToBids(auctionId, (bid) => {
+      console.log('[live] bid event received, lotId=', bid.lotId, 'currentLot=', currentLotRef.current?.id);
+      if (bid.lotId !== currentLotRef.current?.id) return;
+      console.log('[live] calling resetClock');
+      setBidHistory((prev) => [bid, ...prev].slice(0, 30));
       setCurrentLot((prev) =>
         prev
           ? { ...prev, currentBid: bid.amount, winningTeamCode: bid.teamCode, winningTeamId: bid.teamId }
           : prev
       );
-      resetClock(bid.placedAt, true);   // ← force=true
+      resetClock(bid.placedAt, true);
     });
 
     const purseSub = subscribeToTeamPurses(
@@ -263,7 +268,6 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
     setActionError(null);
     try {
       const newLot = await startRandomLot(auctionId);
-      // Lot is now "shuffling" — UI updates via realtime subscription
       setLotNumber(newLot.lotNumber);
       setSoldState("pending");
       setGlowActive(false);
@@ -320,9 +324,17 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
     }
   }
 
+  async function handlePauseWithFeedback() {
+    await handlePause();
+    setFeedbackTrigger("paused");
+    setShowFeedback(true);
+  }
+
   async function handleEndSession() {
     if (!confirm("End the auction session? This cannot be undone.")) return;
     await handleStop();
+    setFeedbackTrigger("completed");
+    setShowFeedback(true);
   }
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -399,819 +411,832 @@ function AuctioneerContent({ auctionId }: { auctionId: string }) {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div
-      className="bg-background text-on-background selection:bg-secondary-container selection:text-on-secondary-container overflow-hidden h-screen flex flex-col relative"
-      style={{ fontFamily: "'Inter', sans-serif" }}
+    <AuctionStatusGate
+      auctionId={auctionId}
+      initialStatus={auction.status ?? "live"}
+      onResume={handleResume}
     >
-      <style jsx global>{`
-        @import url('https://fonts.googleapis.com/css2?family=Archivo+Narrow:ital,wght@0,400;0,600;0,700;1,700&family=Inter:wght@400;500;700&family=Geist+Mono:wght@400;500;700&display=swap');
-        @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
-
-        .font-archivo    { font-family: 'Archivo Narrow', sans-serif; }
-        .font-mono-geist { font-family: 'Geist Mono', monospace; }
-        .font-inter      { font-family: 'Inter', sans-serif; }
-
-        .material-symbols-outlined {
-          font-family: 'Material Symbols Outlined';
-          font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-          font-style: normal; line-height: 1; display: inline-block;
-          text-transform: none; letter-spacing: normal; user-select: none;
-        }
-
-        .glass-panel {
-          background: rgba(16, 20, 21, 0.6);
-          backdrop-filter: blur(20px);
-          border: 1px solid rgba(255,255,255,0.08);
-        }
-
-        .custom-scrollbar::-webkit-scrollbar       { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-
-        .auction-particle {
-          position: fixed; pointer-events: none; z-index: 100;
-          border-radius: 50%; width: 8px; height: 8px;
-          animation-name: particle-fly;
-          animation-timing-function: cubic-bezier(0.1, 0.8, 0.3, 1);
-          animation-fill-mode: forwards;
-        }
-        @keyframes particle-fly {
-          0%   { transform: translate(0,0) scale(1); opacity: 1; }
-          100% { transform: translate(var(--tx), var(--ty)) scale(0); opacity: 0; }
-        }
-
-        .auction-sold-stamp {
-          transform: rotate(-13deg);
-          animation: sold-land 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
-        }
-        @keyframes sold-land {
-          0%   { opacity: 0; transform: rotate(-13deg) scale(2.2); filter: blur(14px); }
-          55%  { opacity: 1; filter: blur(0); }
-          70%  { transform: rotate(-13deg) scale(0.96); }
-          85%  { transform: rotate(-13deg) scale(1.02); }
-          100% { transform: rotate(-13deg) scale(1); }
-        }
-        .sold-stamp-face {
-          position: relative; padding: 20px 52px 18px;
-          border: 4px solid #C9920A; border-radius: 4px;
-          overflow: hidden; background: rgba(197,134,10,0.07);
-        }
-        .sold-inner-ring {
-          position: absolute; inset: 5px;
-          border: 1px solid rgba(201,146,10,0.32); border-radius: 2px;
-          pointer-events: none; z-index: 1;
-        }
-        .sold-hatch-layer {
-          position: absolute; inset: 0;
-          background: repeating-linear-gradient(
-            108deg,
-            transparent 0px, transparent 13px,
-            rgba(245,180,0,0.07) 13px, rgba(245,180,0,0.07) 14px
-          );
-          pointer-events: none;
-        }
-        .sold-word {
-          font-family: 'Archivo Narrow', sans-serif;
-          font-size: 76px; font-weight: 700; font-style: italic;
-          letter-spacing: 0.14em; text-transform: uppercase;
-          color: #F5B400; line-height: 1; display: block;
-          position: relative; z-index: 2;
-          text-shadow: 0 0 60px rgba(245,180,0,0.25);
-        }
-        .sold-dots {
-          display: flex; gap: 6px; justify-content: center;
-          margin-top: 8px; position: relative; z-index: 2;
-        }
-        .sold-dot {
-          display: block; width: 5px; height: 5px; border-radius: 50%;
-          background: rgba(245,180,0,0.45);
-        }
-        .sold-sub {
-          display: block; text-align: center;
-          font-family: 'Geist Mono', monospace;
-          font-size: 9px; font-weight: 500;
-          letter-spacing: 0.42em; text-transform: uppercase;
-          color: rgba(245,180,0,0.6);
-          margin-top: 8px; position: relative; z-index: 2;
-        }
-        .sold-bar {
-          position: absolute; left: 0; right: 0; bottom: 0;
-          height: 6px; background: #C9920A;
-        }
-
-        .auction-unsold-stamp {
-          transform: rotate(13deg);
-          animation: unsold-land 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.05s both;
-        }
-        @keyframes unsold-land {
-          0%   { opacity: 0; transform: rotate(13deg) scale(2.2); filter: blur(14px); }
-          55%  { opacity: 1; filter: blur(0); }
-          70%  { transform: rotate(13deg) scale(0.96); }
-          85%  { transform: rotate(13deg) scale(1.02); }
-          100% { transform: rotate(13deg) scale(1); }
-        }
-        .unsold-stamp-face {
-          position: relative; padding: 20px 38px 18px;
-          border: 4px solid #718096; border-radius: 4px;
-          overflow: hidden; background: rgba(74,85,104,0.08);
-        }
-        .unsold-inner-ring {
-          position: absolute; inset: 5px;
-          border: 1px solid rgba(113,128,150,0.30); border-radius: 2px;
-          pointer-events: none; z-index: 1;
-        }
-        .unsold-hatch-layer {
-          position: absolute; inset: 0;
-          background:
-            repeating-linear-gradient(-45deg, transparent 0px, transparent 6px, rgba(113,128,150,0.08) 6px, rgba(113,128,150,0.08) 7px),
-            repeating-linear-gradient( 45deg, transparent 0px, transparent 6px, rgba(113,128,150,0.05) 6px, rgba(113,128,150,0.05) 7px);
-          pointer-events: none;
-        }
-        .cross-mark { position: absolute; width: 16px; height: 16px; z-index: 3; }
-        .cross-h, .cross-v { position: absolute; background: rgba(113,128,150,0.65); border-radius: 1px; }
-        .cross-h { width: 100%; height: 2px; top: 50%; transform: translateY(-50%); }
-        .cross-v { height: 100%; width: 2px; left: 50%; transform: translateX(-50%); }
-        .corner-tl { top: 8px;    left: 8px;    }
-        .corner-tr { top: 8px;    right: 8px;   }
-        .corner-bl { bottom: 8px; left: 8px;    }
-        .corner-br { bottom: 8px; right: 8px;   }
-        .unsold-word {
-          font-family: 'Archivo Narrow', sans-serif;
-          font-size: 58px; font-weight: 700; font-style: italic;
-          letter-spacing: 0.12em; text-transform: uppercase;
-          color: #A0AEC0; line-height: 1; display: block;
-          position: relative; z-index: 2;
-        }
-        .unsold-sub {
-          display: block; text-align: center;
-          font-family: 'Geist Mono', monospace;
-          font-size: 9px; font-weight: 500;
-          letter-spacing: 0.35em; text-transform: uppercase;
-          color: rgba(160,174,192,0.55);
-          margin-top: 8px; position: relative; z-index: 2;
-        }
-
-        @keyframes locked-pulse {
-          0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
-          50%     { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
-        }
-        .locked-pulse { animation: locked-pulse 1.2s ease-in-out infinite; }
-
-        @keyframes revealing-pulse {
-          0%,100% { opacity: 1; }
-          50%     { opacity: 0.5; }
-        }
-        .revealing-pulse { animation: revealing-pulse 1s ease-in-out infinite; }
-      `}</style>
-
-      {/* Particles */}
-      {particles.map((p) => (
-        <span
-          key={p.id}
-          className="auction-particle"
-          style={{
-            left: "50%",
-            top: "50%",
-            backgroundColor: p.color,
-            "--tx": `${p.tx}px`,
-            "--ty": `${p.ty}px`,
-            animationDuration: `${p.duration}s`,
-          } as React.CSSProperties}
-        />
-      ))}
-
-      {/* Flash overlay */}
       <div
-        className={`fixed inset-0 pointer-events-none z-[60] transition-opacity duration-75 ${
-          soldState === "sold"
-            ? "bg-amber-400/10"
-            : soldState === "unsold"
-            ? "bg-slate-400/5"
-            : "bg-white/0"
-        } ${flashActive ? "opacity-100" : "opacity-0"}`}
-      />
-
-      {/* Glow overlay */}
-      <div
-        className={`fixed inset-0 pointer-events-none z-[55] flex items-center justify-center transition-opacity duration-500 ${
-          glowActive ? "opacity-100" : "opacity-0"
-        }`}
+        className="bg-background text-on-background selection:bg-secondary-container selection:text-on-secondary-container overflow-hidden h-screen flex flex-col relative"
+        style={{ fontFamily: "'Inter', sans-serif" }}
       >
-        <div
-          className="w-[500px] h-[500px] rounded-full blur-[120px]"
-          style={{
+        <style jsx global>{`
+          @import url('https://fonts.googleapis.com/css2?family=Archivo+Narrow:ital,wght@0,400;0,600;0,700;1,700&family=Inter:wght@400;500;700&family=Geist+Mono:wght@400;500;700&display=swap');
+          @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
+
+          .font-archivo    { font-family: 'Archivo Narrow', sans-serif; }
+          .font-mono-geist { font-family: 'Geist Mono', monospace; }
+          .font-inter      { font-family: 'Inter', sans-serif; }
+
+          .material-symbols-outlined {
+            font-family: 'Material Symbols Outlined';
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            font-style: normal; line-height: 1; display: inline-block;
+            text-transform: none; letter-spacing: normal; user-select: none;
+          }
+
+          .glass-panel {
+            background: rgba(16, 20, 21, 0.6);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.08);
+          }
+
+          .custom-scrollbar::-webkit-scrollbar       { width: 4px; }
+          .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+          .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+
+          .auction-particle {
+            position: fixed; pointer-events: none; z-index: 100;
+            border-radius: 50%; width: 8px; height: 8px;
+            animation-name: particle-fly;
+            animation-timing-function: cubic-bezier(0.1, 0.8, 0.3, 1);
+            animation-fill-mode: forwards;
+          }
+          @keyframes particle-fly {
+            0%   { transform: translate(0,0) scale(1); opacity: 1; }
+            100% { transform: translate(var(--tx), var(--ty)) scale(0); opacity: 0; }
+          }
+
+          .auction-sold-stamp {
+            transform: rotate(-13deg);
+            animation: sold-land 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+          }
+          @keyframes sold-land {
+            0%   { opacity: 0; transform: rotate(-13deg) scale(2.2); filter: blur(14px); }
+            55%  { opacity: 1; filter: blur(0); }
+            70%  { transform: rotate(-13deg) scale(0.96); }
+            85%  { transform: rotate(-13deg) scale(1.02); }
+            100% { transform: rotate(-13deg) scale(1); }
+          }
+          .sold-stamp-face {
+            position: relative; padding: 20px 52px 18px;
+            border: 4px solid #C9920A; border-radius: 4px;
+            overflow: hidden; background: rgba(197,134,10,0.07);
+          }
+          .sold-inner-ring {
+            position: absolute; inset: 5px;
+            border: 1px solid rgba(201,146,10,0.32); border-radius: 2px;
+            pointer-events: none; z-index: 1;
+          }
+          .sold-hatch-layer {
+            position: absolute; inset: 0;
+            background: repeating-linear-gradient(
+              108deg,
+              transparent 0px, transparent 13px,
+              rgba(245,180,0,0.07) 13px, rgba(245,180,0,0.07) 14px
+            );
+            pointer-events: none;
+          }
+          .sold-word {
+            font-family: 'Archivo Narrow', sans-serif;
+            font-size: 76px; font-weight: 700; font-style: italic;
+            letter-spacing: 0.14em; text-transform: uppercase;
+            color: #F5B400; line-height: 1; display: block;
+            position: relative; z-index: 2;
+            text-shadow: 0 0 60px rgba(245,180,0,0.25);
+          }
+          .sold-dots {
+            display: flex; gap: 6px; justify-content: center;
+            margin-top: 8px; position: relative; z-index: 2;
+          }
+          .sold-dot {
+            display: block; width: 5px; height: 5px; border-radius: 50%;
+            background: rgba(245,180,0,0.45);
+          }
+          .sold-sub {
+            display: block; text-align: center;
+            font-family: 'Geist Mono', monospace;
+            font-size: 9px; font-weight: 500;
+            letter-spacing: 0.42em; text-transform: uppercase;
+            color: rgba(245,180,0,0.6);
+            margin-top: 8px; position: relative; z-index: 2;
+          }
+          .sold-bar {
+            position: absolute; left: 0; right: 0; bottom: 0;
+            height: 6px; background: #C9920A;
+          }
+
+          .auction-unsold-stamp {
+            transform: rotate(13deg);
+            animation: unsold-land 0.55s cubic-bezier(0.22, 1, 0.36, 1) 0.05s both;
+          }
+          @keyframes unsold-land {
+            0%   { opacity: 0; transform: rotate(13deg) scale(2.2); filter: blur(14px); }
+            55%  { opacity: 1; filter: blur(0); }
+            70%  { transform: rotate(13deg) scale(0.96); }
+            85%  { transform: rotate(13deg) scale(1.02); }
+            100% { transform: rotate(13deg) scale(1); }
+          }
+          .unsold-stamp-face {
+            position: relative; padding: 20px 38px 18px;
+            border: 4px solid #718096; border-radius: 4px;
+            overflow: hidden; background: rgba(74,85,104,0.08);
+          }
+          .unsold-inner-ring {
+            position: absolute; inset: 5px;
+            border: 1px solid rgba(113,128,150,0.30); border-radius: 2px;
+            pointer-events: none; z-index: 1;
+          }
+          .unsold-hatch-layer {
+            position: absolute; inset: 0;
             background:
-              soldState === "sold"
-                ? "rgba(245,180,0,0.18)"
-                : "rgba(113,128,150,0.12)",
-          }}
-        />
-      </div>
+              repeating-linear-gradient(-45deg, transparent 0px, transparent 6px, rgba(113,128,150,0.08) 6px, rgba(113,128,150,0.08) 7px),
+              repeating-linear-gradient( 45deg, transparent 0px, transparent 6px, rgba(113,128,150,0.05) 6px, rgba(113,128,150,0.05) 7px);
+            pointer-events: none;
+          }
+          .cross-mark { position: absolute; width: 16px; height: 16px; z-index: 3; }
+          .cross-h, .cross-v { position: absolute; background: rgba(113,128,150,0.65); border-radius: 1px; }
+          .cross-h { width: 100%; height: 2px; top: 50%; transform: translateY(-50%); }
+          .cross-v { height: 100%; width: 2px; left: 50%; transform: translateX(-50%); }
+          .corner-tl { top: 8px;    left: 8px;    }
+          .corner-tr { top: 8px;    right: 8px;   }
+          .corner-bl { bottom: 8px; left: 8px;    }
+          .corner-br { bottom: 8px; right: 8px;   }
+          .unsold-word {
+            font-family: 'Archivo Narrow', sans-serif;
+            font-size: 58px; font-weight: 700; font-style: italic;
+            letter-spacing: 0.12em; text-transform: uppercase;
+            color: #A0AEC0; line-height: 1; display: block;
+            position: relative; z-index: 2;
+          }
+          .unsold-sub {
+            display: block; text-align: center;
+            font-family: 'Geist Mono', monospace;
+            font-size: 9px; font-weight: 500;
+            letter-spacing: 0.35em; text-transform: uppercase;
+            color: rgba(160,174,192,0.55);
+            margin-top: 8px; position: relative; z-index: 2;
+          }
 
-      {/* Error toast */}
-      {actionError && (
-        <div
-          className="fixed top-20 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold"
-          style={{
-            background: "rgba(248,113,113,0.12)",
-            border: "1px solid rgba(248,113,113,0.4)",
-            color: "#f87171",
-            fontFamily: "'Geist Mono', monospace",
-            backdropFilter: "blur(12px)",
-          }}
-        >
-          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>error</span>
-          {actionError}
-          <button onClick={() => setActionError(null)} className="ml-2 opacity-60 hover:opacity-100">✕</button>
-        </div>
-      )}
+          @keyframes locked-pulse {
+            0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+            50%     { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+          }
+          .locked-pulse { animation: locked-pulse 1.2s ease-in-out infinite; }
 
-      {/* Revealing banner */}
-      {isShuffling && (
-        <div
-          className="fixed top-20 left-1/2 -translate-x-1/2 z-[295] flex items-center gap-3 px-5 py-2 rounded-full text-xs font-bold revealing-pulse"
-          style={{
-            background: "rgba(245,180,0,0.10)",
-            border: "1px solid rgba(245,180,0,0.4)",
-            color: "#F5B400",
-            fontFamily: "'Geist Mono', monospace",
-            backdropFilter: "blur(12px)",
-          }}
-        >
-          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>animated_images</span>
-          Revealing player on broadcast screen…
-        </div>
-      )}
+          @keyframes revealing-pulse {
+            0%,100% { opacity: 1; }
+            50%     { opacity: 0.5; }
+          }
+          .revealing-pulse { animation: revealing-pulse 1s ease-in-out infinite; }
+        `}</style>
 
-      {/* Bidding locked banner */}
-      {isLocked && soldState === "pending" && currentLot && !isShuffling && (
-        <div
-          className="fixed top-20 left-1/2 -translate-x-1/2 z-[295] flex items-center gap-3 px-5 py-2 rounded-full text-xs font-bold locked-pulse"
-          style={{
-            background: "rgba(239,68,68,0.12)",
-            border: "1px solid rgba(239,68,68,0.5)",
-            color: "#ef4444",
-            fontFamily: "'Geist Mono', monospace",
-            backdropFilter: "blur(12px)",
-          }}
-        >
-          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>timer_off</span>
-          Bidding locked — hammer sold or mark unsold
-        </div>
-      )}
-
-      {/* Shuffle-required banner */}
-      {!shuffleReady && !isShuffling && (
-        <div
-          className="fixed top-20 left-1/2 -translate-x-1/2 z-[290] flex items-center gap-3 px-4 py-2 rounded-full text-xs font-bold"
-          style={{
-            background: "rgba(234,179,8,0.10)",
-            border: "1px solid rgba(234,179,8,0.4)",
-            color: "#eab308",
-            fontFamily: "'Geist Mono', monospace",
-            backdropFilter: "blur(12px)",
-          }}
-        >
-          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>warning</span>
-          Lot order isn't fully shuffled — at least one player is missing a draw position.
-          <button
-            onClick={handleFixShuffle}
-            disabled={isShufflingPool}
-            className="ml-1 flex items-center gap-1 px-3 py-1 rounded-full font-bold uppercase tracking-[0.1em] text-[10px]"
+        {/* Particles */}
+        {particles.map((p) => (
+          <span
+            key={p.id}
+            className="auction-particle"
             style={{
-              background: "#eab308",
-              color: "#1a0e00",
-              opacity: isShufflingPool ? 0.6 : 1,
+              left: "50%",
+              top: "50%",
+              backgroundColor: p.color,
+              "--tx": `${p.tx}px`,
+              "--ty": `${p.ty}px`,
+              animationDuration: `${p.duration}s`,
+            } as React.CSSProperties}
+          />
+        ))}
+
+        {/* Flash overlay */}
+        <div
+          className={`fixed inset-0 pointer-events-none z-[60] transition-opacity duration-75 ${
+            soldState === "sold"
+              ? "bg-amber-400/10"
+              : soldState === "unsold"
+              ? "bg-slate-400/5"
+              : "bg-white/0"
+          } ${flashActive ? "opacity-100" : "opacity-0"}`}
+        />
+
+        {/* Glow overlay */}
+        <div
+          className={`fixed inset-0 pointer-events-none z-[55] flex items-center justify-center transition-opacity duration-500 ${
+            glowActive ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          <div
+            className="w-[500px] h-[500px] rounded-full blur-[120px]"
+            style={{
+              background:
+                soldState === "sold"
+                  ? "rgba(245,180,0,0.18)"
+                  : "rgba(113,128,150,0.12)",
+            }}
+          />
+        </div>
+
+        {/* Error toast */}
+        {actionError && (
+          <div
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-[300] flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold"
+            style={{
+              background: "rgba(248,113,113,0.12)",
+              border: "1px solid rgba(248,113,113,0.4)",
+              color: "#f87171",
+              fontFamily: "'Geist Mono', monospace",
+              backdropFilter: "blur(12px)",
             }}
           >
-            <span className={`material-symbols-outlined text-[12px] ${isShufflingPool ? "animate-spin" : ""}`}>
-              {isShufflingPool ? "refresh" : "shuffle"}
-            </span>
-            {isShufflingPool ? "Shuffling…" : "Shuffle Now"}
-          </button>
-        </div>
-      )}
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>error</span>
+            {actionError}
+            <button onClick={() => setActionError(null)} className="ml-2 opacity-60 hover:opacity-100">✕</button>
+          </div>
+        )}
 
-      {/* ══════════ TOP BAR ══════════ */}
-      <header className="fixed top-0 w-full z-50 flex justify-between items-center px-8 h-16 glass-panel border-b border-white/10">
-        <div className="flex items-center gap-4">
-          <span className="material-symbols-outlined text-amber-400 text-3xl">sports_cricket</span>
-          <h1 className="font-archivo text-2xl font-bold tracking-tighter text-on-background">
-            APL <span className="text-amber-400">AUCTION</span>
-          </h1>
-          <div className="ml-8 flex items-center gap-3 px-4 py-1.5 bg-amber-400/10 border border-amber-400/20 rounded-full">
-            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-            <span className="font-mono-geist text-xs text-amber-400 uppercase font-bold tracking-[0.18em]">
-              Live: {auction.session.auctionName}
-            </span>
-          </div>
-        </div>
-        <div className="flex items-center gap-8">
-          {/* Shot clock — only shown once lot is pending */}
-          {currentLot && soldState === "pending" && !isShuffling && (
-            <div className="flex items-center gap-3">
-              <span
-                className="font-mono-geist text-[10px] uppercase tracking-[0.1em]"
-                style={{ color: shotClockColor }}
-              >
-                {isLocked ? "Locked" : "Clock"}
-              </span>
-              <div className="w-24 h-1.5 bg-white/10 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-100"
-                  style={{ width: `${shotClock}%`, background: shotClockColor }}
-                />
-              </div>
-            </div>
-          )}
-          {/* Revealing indicator in header */}
-          {isShuffling && (
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-amber-400 text-sm animate-spin">refresh</span>
-              <span className="font-mono-geist text-[10px] text-amber-400 uppercase tracking-[0.1em]">
-                Revealing…
-              </span>
-            </div>
-          )}
-          <div className="flex items-center gap-2 text-on-surface-variant font-mono-geist text-[10px] uppercase tracking-[0.12em]">
-            <span className="material-symbols-outlined text-sm">lock</span>
-            Secure Admin Node
-          </div>
-          <div className="font-mono-geist text-[10px] text-right">
-            <div className="text-on-surface-variant uppercase tracking-[0.1em]">Lot</div>
-            <div className="text-amber-400 font-bold">
-              #{lotNumber} / {auction.players.length}
-            </div>
-          </div>
-          <button
-            onClick={handleEndSession}
-            className="bg-error-container text-on-error-container px-6 py-2 rounded font-mono-geist font-bold hover:brightness-110 transition-all active:scale-95 border border-white/10 uppercase tracking-[0.2em] text-xs"
+        {/* Revealing banner */}
+        {isShuffling && (
+          <div
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-[295] flex items-center gap-3 px-5 py-2 rounded-full text-xs font-bold revealing-pulse"
+            style={{
+              background: "rgba(245,180,0,0.10)",
+              border: "1px solid rgba(245,180,0,0.4)",
+              color: "#F5B400",
+              fontFamily: "'Geist Mono', monospace",
+              backdropFilter: "blur(12px)",
+            }}
           >
-            End Session
-          </button>
-        </div>
-      </header>
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>animated_images</span>
+            Revealing player on broadcast screen…
+          </div>
+        )}
 
-      <main className="mt-16 h-[calc(100vh-4rem)] overflow-hidden grid grid-cols-[20%_55%_25%]">
+        {/* Bidding locked banner */}
+        {isLocked && soldState === "pending" && currentLot && !isShuffling && (
+          <div
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-[295] flex items-center gap-3 px-5 py-2 rounded-full text-xs font-bold locked-pulse"
+            style={{
+              background: "rgba(239,68,68,0.12)",
+              border: "1px solid rgba(239,68,68,0.5)",
+              color: "#ef4444",
+              fontFamily: "'Geist Mono', monospace",
+              backdropFilter: "blur(12px)",
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>timer_off</span>
+            Bidding locked — hammer sold or mark unsold
+          </div>
+        )}
 
-        {/* ══════════ LEFT: Queue ══════════ */}
-        <aside className="hidden xl:flex flex-col h-full bg-surface-container-lowest border-r border-outline-variant shrink-0 overflow-hidden">
-          <div className="px-8 pt-8 pb-6 border-b border-outline-variant">
-            <div className="flex items-center gap-4 mb-6">
-              <div className="w-10 h-10 rounded-xl bg-amber-400/10 border border-amber-400/20 flex items-center justify-center">
-                <span className="material-symbols-outlined text-amber-400 text-xl">manage_accounts</span>
-              </div>
-              <div>
-                <p className="font-inter text-on-surface font-bold text-sm">Chief Auctioneer</p>
-                <p className="font-mono-geist text-[10px] uppercase tracking-[0.12em] text-on-surface-variant">
-                  Admin Privileges
-                </p>
-              </div>
-            </div>
-            <div className="flex justify-between items-center">
-              <h3 className="font-mono-geist text-xs text-on-surface-variant uppercase font-bold tracking-[0.2em]">
-                Remaining Pool
-              </h3>
-              <span className="bg-surface-variant px-2 py-0.5 rounded font-mono-geist text-[10px] font-bold tracking-widest">
-                {playerQueue.length} PENDING
+        {/* Shuffle-required banner */}
+        {!shuffleReady && !isShuffling && (
+          <div
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-[290] flex items-center gap-3 px-4 py-2 rounded-full text-xs font-bold"
+            style={{
+              background: "rgba(234,179,8,0.10)",
+              border: "1px solid rgba(234,179,8,0.4)",
+              color: "#eab308",
+              fontFamily: "'Geist Mono', monospace",
+              backdropFilter: "blur(12px)",
+            }}
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>warning</span>
+            Lot order isn't fully shuffled — at least one player is missing a draw position.
+            <button
+              onClick={handleFixShuffle}
+              disabled={isShufflingPool}
+              className="ml-1 flex items-center gap-1 px-3 py-1 rounded-full font-bold uppercase tracking-[0.1em] text-[10px]"
+              style={{
+                background: "#eab308",
+                color: "#1a0e00",
+                opacity: isShufflingPool ? 0.6 : 1,
+              }}
+            >
+              <span className={`material-symbols-outlined text-[12px] ${isShufflingPool ? "animate-spin" : ""}`}>
+                {isShufflingPool ? "refresh" : "shuffle"}
+              </span>
+              {isShufflingPool ? "Shuffling…" : "Shuffle Now"}
+            </button>
+          </div>
+        )}
+
+        {/* ══════════ TOP BAR ══════════ */}
+        <header className="fixed top-0 w-full z-50 flex justify-between items-center px-8 h-16 glass-panel border-b border-white/10">
+          <div className="flex items-center gap-4">
+            <span className="material-symbols-outlined text-amber-400 text-3xl">sports_cricket</span>
+            <h1 className="font-archivo text-2xl font-bold tracking-tighter text-on-background">
+              APL <span className="text-amber-400">AUCTION</span>
+            </h1>
+            <div className="ml-8 flex items-center gap-3 px-4 py-1.5 bg-amber-400/10 border border-amber-400/20 rounded-full">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span className="font-mono-geist text-xs text-amber-400 uppercase font-bold tracking-[0.18em]">
+                Live: {auction.session.auctionName}
               </span>
             </div>
           </div>
-
-          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4 space-y-2">
-            {playerQueue.map((p) => (
-              <div
-                key={p.supabaseId ?? p.id}
-                className="p-4 hover:bg-white/5 rounded transition-all group flex items-center gap-4"
-              >
-                <span className="material-symbols-outlined text-on-surface-variant group-hover:text-on-surface transition-colors">
-                  person
+          <div className="flex items-center gap-4">
+            {currentLot && soldState === "pending" && !isShuffling && (
+              <div className="flex items-center gap-3">
+                <span
+                  className="font-mono-geist text-[10px] uppercase tracking-[0.1em]"
+                  style={{ color: shotClockColor }}
+                >
+                  {isLocked ? "Locked" : "Clock"}
                 </span>
-                <div>
-                  <p className="font-archivo text-sm font-bold uppercase text-on-surface-variant group-hover:text-on-surface">
-                    {p.name}
-                  </p>
-                  <p className="font-mono-geist text-[10px] text-on-surface-variant">
-                    {p.role} | {p.country}
-                  </p>
+                <div className="w-24 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-100"
+                    style={{ width: `${shotClock}%`, background: shotClockColor }}
+                  />
                 </div>
-              </div>
-            ))}
-
-            {playerQueue.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <span className="material-symbols-outlined text-on-surface-variant text-4xl mb-2">
-                  check_circle
-                </span>
-                <p className="font-mono-geist text-xs text-on-surface-variant uppercase tracking-widest">
-                  All players called
-                </p>
               </div>
             )}
+            {isShuffling && (
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-amber-400 text-sm animate-spin">refresh</span>
+                <span className="font-mono-geist text-[10px] text-amber-400 uppercase tracking-[0.1em]">
+                  Revealing…
+                </span>
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-on-surface-variant font-mono-geist text-[10px] uppercase tracking-[0.12em]">
+              <span className="material-symbols-outlined text-sm">lock</span>
+              Secure Admin Node
+            </div>
+            <div className="font-mono-geist text-[10px] text-right">
+              <div className="text-on-surface-variant uppercase tracking-[0.1em]">Lot</div>
+              <div className="text-amber-400 font-bold">
+                #{lotNumber} / {auction.players.length}
+              </div>
+            </div>
+            <button
+              onClick={handlePauseWithFeedback}
+              className="bg-surface-variant text-on-surface-variant px-6 py-2 rounded font-mono-geist font-bold hover:brightness-110 transition-all active:scale-95 border border-white/10 uppercase tracking-[0.2em] text-xs"
+            >
+              Pause
+            </button>
+            <button
+              onClick={handleEndSession}
+              className="bg-error-container text-on-error-container px-6 py-2 rounded font-mono-geist font-bold hover:brightness-110 transition-all active:scale-95 border border-white/10 uppercase tracking-[0.2em] text-xs"
+            >
+              End Session
+            </button>
           </div>
-        </aside>
+        </header>
 
-        {/* ══════════ CENTER ══════════ */}
-        <section className="flex flex-col h-full p-4 gap-4 overflow-hidden">
+        <main className="mt-16 h-[calc(100vh-4rem)] overflow-hidden grid grid-cols-[20%_55%_25%]">
 
-          {/* Player card */}
-          <div
-            className={`glass-panel rounded-2xl flex flex-col md:flex-row relative overflow-hidden group items-start transition-all duration-700 p-4 gap-4 ${
-              isShuffling
-                ? "opacity-60"
-                : soldState === "sold"
-                ? "scale-[1.01] shadow-[0_0_80px_rgba(245,180,0,0.12)]"
-                : soldState === "unsold"
-                ? "scale-[1.01] shadow-[0_0_60px_rgba(113,128,150,0.1)]"
-                : isLocked
-                ? "shadow-[0_0_40px_rgba(239,68,68,0.08)]"
-                : ""
-            }`}
-          >
-            <div className="absolute -top-20 -right-20 w-80 h-80 bg-amber-400/5 blur-[100px] rounded-full" />
+          {/* ══════════ LEFT: Queue ══════════ */}
+          <aside className="hidden xl:flex flex-col h-full bg-surface-container-lowest border-r border-outline-variant shrink-0 overflow-hidden">
+            <div className="px-8 pt-8 pb-6 border-b border-outline-variant">
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-amber-400/10 border border-amber-400/20 flex items-center justify-center">
+                  <span className="material-symbols-outlined text-amber-400 text-xl">manage_accounts</span>
+                </div>
+                <div>
+                  <p className="font-inter text-on-surface font-bold text-sm">Chief Auctioneer</p>
+                  <p className="font-mono-geist text-[10px] uppercase tracking-[0.12em] text-on-surface-variant">
+                    Admin Privileges
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-between items-center">
+                <h3 className="font-mono-geist text-xs text-on-surface-variant uppercase font-bold tracking-[0.2em]">
+                  Remaining Pool
+                </h3>
+                <span className="bg-surface-variant px-2 py-0.5 rounded font-mono-geist text-[10px] font-bold tracking-widest">
+                  {playerQueue.length} PENDING
+                </span>
+              </div>
+            </div>
 
-            {soldState === "sold"   && !isShuffling && <AuctionStamp state="sold"   />}
-            {soldState === "unsold" && !isShuffling && <AuctionStamp state="unsold" />}
-
-            <div className="flex-1 flex flex-col md:flex-row gap-6 relative z-10 w-full items-start">
-              {/* Photo + primary controls */}
-              <div className="relative group/img">
-                <div className="w-64 h-64 rounded-2xl overflow-hidden border-2 border-white/10 shadow-2xl relative">
-                  {currentLot?.playerImg ? (
-                    <img
-                      alt={currentLot.playerName}
-                      className={`w-full h-full object-cover object-top transition-all duration-500 ${isShuffling ? "blur-md grayscale" : "grayscale-[0.2] group-hover/img:grayscale-0"}`}
-                      src={currentLot.playerImg}
-                    />
-                  ) : (
-                    <div className="w-full h-full bg-[#1c2021] flex items-center justify-center">
-                      <span className="material-symbols-outlined text-[#2a3a44]" style={{ fontSize: 64 }}>
-                        {isShuffling ? "animated_images" : "person"}
-                      </span>
-                    </div>
-                  )}
-                  <div className="absolute top-2 right-2 z-20 bg-white text-black px-2 py-1 rounded font-mono-geist text-[10px] font-bold tracking-[0.32em] shadow-lg">
-                    LOT #{currentLot?.lotNumber ?? "—"}
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-4 space-y-2">
+              {playerQueue.map((p) => (
+                <div
+                  key={p.supabaseId ?? p.id}
+                  className="p-4 hover:bg-white/5 rounded transition-all group flex items-center gap-4"
+                >
+                  <span className="material-symbols-outlined text-on-surface-variant group-hover:text-on-surface transition-colors">
+                    person
+                  </span>
+                  <div>
+                    <p className="font-archivo text-sm font-bold uppercase text-on-surface-variant group-hover:text-on-surface">
+                      {p.name}
+                    </p>
+                    <p className="font-mono-geist text-[10px] text-on-surface-variant">
+                      {p.role} | {p.country}
+                    </p>
                   </div>
-                  {/* Shot clock overlay — only when pending */}
-                  {currentLot && soldState === "pending" && !isShuffling && (
-                    <div className="absolute bottom-0 left-0 right-0 h-1">
-                      <div
-                        className="h-full transition-all duration-100"
-                        style={{
-                          width: `${shotClock}%`,
-                          background: shotClockColor,
-                          boxShadow: `0 0 6px ${shotClockColor}`,
-                        }}
+                </div>
+              ))}
+
+              {playerQueue.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <span className="material-symbols-outlined text-on-surface-variant text-4xl mb-2">
+                    check_circle
+                  </span>
+                  <p className="font-mono-geist text-xs text-on-surface-variant uppercase tracking-widest">
+                    All players called
+                  </p>
+                </div>
+              )}
+            </div>
+          </aside>
+
+          {/* ══════════ CENTER ══════════ */}
+          <section className="flex flex-col h-full p-4 gap-4 overflow-hidden">
+            <div
+              className={`glass-panel rounded-2xl flex flex-col md:flex-row relative overflow-hidden group items-start transition-all duration-700 p-4 gap-4 ${
+                isShuffling
+                  ? "opacity-60"
+                  : soldState === "sold"
+                  ? "scale-[1.01] shadow-[0_0_80px_rgba(245,180,0,0.12)]"
+                  : soldState === "unsold"
+                  ? "scale-[1.01] shadow-[0_0_60px_rgba(113,128,150,0.1)]"
+                  : isLocked
+                  ? "shadow-[0_0_40px_rgba(239,68,68,0.08)]"
+                  : ""
+              }`}
+            >
+              <div className="absolute -top-20 -right-20 w-80 h-80 bg-amber-400/5 blur-[100px] rounded-full" />
+
+              {soldState === "sold"   && !isShuffling && <AuctionStamp state="sold"   />}
+              {soldState === "unsold" && !isShuffling && <AuctionStamp state="unsold" />}
+
+              <div className="flex-1 flex flex-col md:flex-row gap-6 relative z-10 w-full items-start">
+                <div className="relative group/img">
+                  <div className="w-64 h-64 rounded-2xl overflow-hidden border-2 border-white/10 shadow-2xl relative">
+                    {currentLot?.playerImg ? (
+                      <img
+                        alt={currentLot.playerName}
+                        className={`w-full h-full object-cover object-top transition-all duration-500 ${isShuffling ? "blur-md grayscale" : "grayscale-[0.2] group-hover/img:grayscale-0"}`}
+                        src={currentLot.playerImg}
                       />
+                    ) : (
+                      <div className="w-full h-full bg-[#1c2021] flex items-center justify-center">
+                        <span className="material-symbols-outlined text-[#2a3a44]" style={{ fontSize: 64 }}>
+                          {isShuffling ? "animated_images" : "person"}
+                        </span>
+                      </div>
+                    )}
+                    <div className="absolute top-2 right-2 z-20 bg-white text-black px-2 py-1 rounded font-mono-geist text-[10px] font-bold tracking-[0.32em] shadow-lg">
+                      LOT #{currentLot?.lotNumber ?? "—"}
                     </div>
-                  )}
+                    {currentLot && soldState === "pending" && !isShuffling && (
+                      <div className="absolute bottom-0 left-0 right-0 h-1">
+                        <div
+                          className="h-full transition-all duration-100"
+                          style={{
+                            width: `${shotClock}%`,
+                            background: shotClockColor,
+                            boxShadow: `0 0 6px ${shotClockColor}`,
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 w-full mt-3">
+                    {isShuffling && (
+                      <div
+                        className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] uppercase tracking-[0.2em]"
+                        style={{
+                          background: "rgba(245,180,0,0.06)",
+                          border: "1px solid rgba(245,180,0,0.2)",
+                          color: "#F5B400",
+                        }}
+                      >
+                        <span className="material-symbols-outlined text-sm animate-spin">refresh</span>
+                        Revealing on broadcast…
+                      </div>
+                    )}
+
+                    {!isShuffling && soldState === "pending" && currentLot && (
+                      <>
+                        <button
+                          onClick={handleHammerSold}
+                          disabled={isBusy || !currentLot.winningTeamId}
+                          className="flex items-center justify-center gap-1 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-lg border border-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
+                          style={{
+                            background: "linear-gradient(135deg,#C9920A,#F5B400)",
+                            color: "#1a0e00",
+                          }}
+                          title={!currentLot.winningTeamId ? "No bids yet" : "Hammer sold"}
+                        >
+                          <span className="material-symbols-outlined text-sm">gavel</span>
+                          Hammer Sold
+                        </button>
+                        <button
+                          onClick={handleMarkUnsold}
+                          disabled={isBusy}
+                          className="flex items-center justify-center gap-1 bg-surface-variant text-on-surface-variant py-3 rounded-lg font-mono-geist text-[10px] uppercase tracking-[0.2em] hover:bg-white/10 transition-all active:scale-95 border border-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          <span className="material-symbols-outlined text-sm">close</span>
+                          Mark Unsold
+                        </button>
+                      </>
+                    )}
+
+                    {!isShuffling && soldState !== "pending" && (
+                      shuffleReady ? (
+                        <button
+                          onClick={handleStartNextPlayer}
+                          disabled={isBusy || playerQueue.length === 0}
+                          className="col-span-2 flex items-center justify-center gap-2 bg-primary text-on-primary py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {playerQueue.length === 0 ? "No more players" : "Next Player"}
+                          {playerQueue.length > 0 && (
+                            <span className="material-symbols-outlined text-sm">arrow_forward</span>
+                          )}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handleFixShuffle}
+                          disabled={isShufflingPool}
+                          className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40 border border-amber-400/30 bg-amber-400/10 text-amber-400"
+                        >
+                          <span className={`material-symbols-outlined text-sm ${isShufflingPool ? "animate-spin" : ""}`}>
+                            {isShufflingPool ? "refresh" : "shuffle"}
+                          </span>
+                          {isShufflingPool ? "Shuffling…" : "Shuffle Lot Order First"}
+                        </button>
+                      )
+                    )}
+
+                    {!isShuffling && !currentLot && soldState === "pending" && playerQueue.length > 0 && (
+                      shuffleReady ? (
+                        <button
+                          onClick={handleStartNextPlayer}
+                          disabled={isBusy}
+                          className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40"
+                          style={{ background: "linear-gradient(135deg,#C9920A,#F5B400)", color: "#1a0e00" }}
+                        >
+                          <span className="material-symbols-outlined text-sm">play_arrow</span>
+                          Start First Player
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handleFixShuffle}
+                          disabled={isShufflingPool}
+                          className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40 border border-amber-400/30 bg-amber-400/10 text-amber-400"
+                        >
+                          <span className={`material-symbols-outlined text-sm ${isShufflingPool ? "animate-spin" : ""}`}>
+                            {isShufflingPool ? "refresh" : "shuffle"}
+                          </span>
+                          {isShufflingPool ? "Shuffling…" : "Shuffle Lot Order First"}
+                        </button>
+                      )
+                    )}
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 w-full mt-3">
-                  {/* Controls blocked during shuffle */}
-                  {isShuffling && (
-                    <div
-                      className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] uppercase tracking-[0.2em]"
+                <div className="flex-1 space-y-4">
+                  <div className="space-y-1">
+                    <span
+                      className="font-mono-geist text-xs tracking-[0.3em] uppercase font-bold"
                       style={{
-                        background: "rgba(245,180,0,0.06)",
-                        border: "1px solid rgba(245,180,0,0.2)",
-                        color: "#F5B400",
+                        color:
+                          isShuffling
+                            ? "#F5B400"
+                            : soldState === "sold"
+                            ? "#F5B400"
+                            : soldState === "unsold"
+                            ? "#718096"
+                            : isLocked
+                            ? "#ef4444"
+                            : "#e45d35",
                       }}
                     >
-                      <span className="material-symbols-outlined text-sm animate-spin">refresh</span>
-                      Revealing on broadcast…
-                    </div>
-                  )}
-
-                  {!isShuffling && soldState === "pending" && currentLot && (
-                    <>
-                      <button
-                        onClick={handleHammerSold}
-                        disabled={isBusy || !currentLot.winningTeamId}
-                        className="flex items-center justify-center gap-1 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-lg border border-white/10 disabled:opacity-40 disabled:cursor-not-allowed"
-                        style={{
-                          background: "linear-gradient(135deg,#C9920A,#F5B400)",
-                          color: "#1a0e00",
-                        }}
-                        title={!currentLot.winningTeamId ? "No bids yet" : "Hammer sold"}
-                      >
-                        <span className="material-symbols-outlined text-sm">gavel</span>
-                        Hammer Sold
-                      </button>
-                      <button
-                        onClick={handleMarkUnsold}
-                        disabled={isBusy}
-                        className="flex items-center justify-center gap-1 bg-surface-variant text-on-surface-variant py-3 rounded-lg font-mono-geist text-[10px] uppercase tracking-[0.2em] hover:bg-white/10 transition-all active:scale-95 border border-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        <span className="material-symbols-outlined text-sm">close</span>
-                        Mark Unsold
-                      </button>
-                    </>
-                  )}
-
-                  {!isShuffling && soldState !== "pending" && (
-                    shuffleReady ? (
-                      <button
-                        onClick={handleStartNextPlayer}
-                        disabled={isBusy || playerQueue.length === 0}
-                        className="col-span-2 flex items-center justify-center gap-2 bg-primary text-on-primary py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        {playerQueue.length === 0 ? "No more players" : "Next Player"}
-                        {playerQueue.length > 0 && (
-                          <span className="material-symbols-outlined text-sm">arrow_forward</span>
+                      {blockLabel}
+                    </span>
+                    <h2 className="font-archivo text-5xl text-white tracking-tight font-bold italic uppercase">
+                      {isShuffling ? "???" : (currentLot?.playerName ?? "—")}
+                    </h2>
+                    {!isShuffling && (
+                      <div className="flex gap-3 items-center flex-wrap">
+                        <span className="px-3 py-1 bg-white/10 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em]">
+                          {currentLot?.playerRole ?? "—"} | {currentLot?.playerCountry ?? "—"}
+                        </span>
+                        <span className="px-3 py-1 bg-white/10 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em]">
+                          Base: {fmtPts(currentLot?.basePrice)} pts
+                        </span>
+                        {currentPlayer?.capped && (
+                          <span className="px-3 py-1 bg-amber-400/10 border border-amber-400/20 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em] text-amber-400">
+                            Capped
+                          </span>
                         )}
-                      </button>
-                    ) : (
-                      <button
-                        onClick={handleFixShuffle}
-                        disabled={isShufflingPool}
-                        className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40 border border-amber-400/30 bg-amber-400/10 text-amber-400"
-                      >
-                        <span className={`material-symbols-outlined text-sm ${isShufflingPool ? "animate-spin" : ""}`}>
-                          {isShufflingPool ? "refresh" : "shuffle"}
-                        </span>
-                        {isShufflingPool ? "Shuffling…" : "Shuffle Lot Order First"}
-                      </button>
-                    )
-                  )}
+                      </div>
+                    )}
+                  </div>
 
-                  {!isShuffling && !currentLot && soldState === "pending" && playerQueue.length > 0 && (
-                    shuffleReady ? (
-                      <button
-                        onClick={handleStartNextPlayer}
-                        disabled={isBusy}
-                        className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40"
-                        style={{ background: "linear-gradient(135deg,#C9920A,#F5B400)", color: "#1a0e00" }}
-                      >
-                        <span className="material-symbols-outlined text-sm">play_arrow</span>
-                        Start First Player
-                      </button>
-                    ) : (
-                      <button
-                        onClick={handleFixShuffle}
-                        disabled={isShufflingPool}
-                        className="col-span-2 flex items-center justify-center gap-2 py-3 rounded-lg font-mono-geist text-[10px] font-bold uppercase tracking-[0.2em] hover:brightness-110 transition-all active:scale-95 shadow-xl disabled:opacity-40 border border-amber-400/30 bg-amber-400/10 text-amber-400"
-                      >
-                        <span className={`material-symbols-outlined text-sm ${isShufflingPool ? "animate-spin" : ""}`}>
-                          {isShufflingPool ? "refresh" : "shuffle"}
-                        </span>
-                        {isShufflingPool ? "Shuffling…" : "Shuffle Lot Order First"}
-                      </button>
-                    )
+                  {currentLot && !isShuffling && (
+                    <div
+                      className={`p-4 glass-panel rounded-xl ${isLocked && soldState === "pending" ? "border-red-500/30" : ""}`}
+                      style={isLocked && soldState === "pending" ? { borderColor: "rgba(239,68,68,0.3)" } : {}}
+                    >
+                      <div className="flex items-end justify-between mb-2">
+                        <div>
+                          <p className="font-mono-geist text-[9px] text-on-surface-variant uppercase tracking-[0.18em] mb-1">
+                            Current High Bid
+                          </p>
+                          <p className="font-archivo text-4xl font-bold text-amber-400">
+                            {fmtPts(currentLot.currentBid)}
+                            <span className="text-sm opacity-50 ml-1">pts</span>
+                          </p>
+                        </div>
+                        {winningTeam && (
+                          <div className="text-right">
+                            <p className="font-mono-geist text-[9px] text-on-surface-variant uppercase tracking-[0.1em] mb-1">
+                              Leading
+                            </p>
+                            <p className="font-archivo text-xl font-bold text-white">{winningTeam.code}</p>
+                          </div>
+                        )}
+                      </div>
+                      {soldState === "pending" && !isLocked && (
+                        <p className="font-mono-geist text-[10px] text-on-surface-variant">
+                          Next bid: <span className="text-amber-400 font-bold">{fmtPts(nextBidAmount)} pts</span>
+                        </p>
+                      )}
+                      {isLocked && soldState === "pending" && (
+                        <p className="font-mono-geist text-[10px]" style={{ color: "#ef4444" }}>
+                          Time expired — no further bids accepted
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
+            </div>
 
-              {/* Player info + bidding info */}
-              <div className="flex-1 space-y-4">
-                <div className="space-y-1">
-                  <span
-                    className="font-mono-geist text-xs tracking-[0.3em] uppercase font-bold"
-                    style={{
-                      color:
-                        isShuffling
-                          ? "#F5B400"
-                          : soldState === "sold"
-                          ? "#F5B400"
-                          : soldState === "unsold"
-                          ? "#718096"
-                          : isLocked
-                          ? "#ef4444"
-                          : "#e45d35",
-                    }}
-                  >
-                    {blockLabel}
+            {/* Bid Log */}
+            <div className="flex-1 min-h-0 glass-panel rounded-2xl flex flex-col overflow-hidden bg-surface-container-lowest">
+              <div className="px-8 py-5 border-b border-white/10 flex justify-between items-center bg-white/5">
+                <h3 className="font-mono-geist text-xs text-on-surface uppercase flex items-center gap-3 font-bold tracking-[0.2em]">
+                  <span className="material-symbols-outlined text-amber-400 text-lg">monitoring</span>
+                  Live Bidding Feed
+                </h3>
+                <div className="flex items-center gap-3">
+                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-ping" />
+                  <span className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-[0.12em] font-bold">
+                    Synchronized
                   </span>
-                  <h2 className="font-archivo text-5xl text-white tracking-tight font-bold italic uppercase">
-                    {isShuffling ? "???" : (currentLot?.playerName ?? "—")}
-                  </h2>
-                  {!isShuffling && (
-                    <div className="flex gap-3 items-center flex-wrap">
-                      <span className="px-3 py-1 bg-white/10 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em]">
-                        {currentLot?.playerRole ?? "—"} | {currentLot?.playerCountry ?? "—"}
-                      </span>
-                      <span className="px-3 py-1 bg-white/10 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em]">
-                        Base: {fmtPts(currentLot?.basePrice)} pts
-                      </span>
-                      {currentPlayer?.capped && (
-                        <span className="px-3 py-1 bg-amber-400/10 border border-amber-400/20 rounded font-mono-geist text-[10px] uppercase tracking-[0.18em] text-amber-400">
-                          Capped
-                        </span>
-                      )}
-                    </div>
-                  )}
                 </div>
+              </div>
 
-                {/* Current bid display — hidden during shuffle */}
-                {currentLot && !isShuffling && (
-                  <div
-                    className={`p-4 glass-panel rounded-xl ${isLocked && soldState === "pending" ? "border-red-500/30" : ""}`}
-                    style={isLocked && soldState === "pending" ? { borderColor: "rgba(239,68,68,0.3)" } : {}}
-                  >
-                    <div className="flex items-end justify-between mb-2">
-                      <div>
-                        <p className="font-mono-geist text-[9px] text-on-surface-variant uppercase tracking-[0.18em] mb-1">
-                          Current High Bid
-                        </p>
-                        <p className="font-archivo text-4xl font-bold text-amber-400">
-                          {fmtPts(currentLot.currentBid)}
-                          <span className="text-sm opacity-50 ml-1">pts</span>
-                        </p>
-                      </div>
-                      {winningTeam && (
-                        <div className="text-right">
-                          <p className="font-mono-geist text-[9px] text-on-surface-variant uppercase tracking-[0.1em] mb-1">
-                            Leading
-                          </p>
-                          <p className="font-archivo text-xl font-bold text-white">{winningTeam.code}</p>
-                        </div>
-                      )}
-                    </div>
-                    {soldState === "pending" && !isLocked && (
-                      <p className="font-mono-geist text-[10px] text-on-surface-variant">
-                        Next bid: <span className="text-amber-400 font-bold">{fmtPts(nextBidAmount)} pts</span>
-                      </p>
-                    )}
-                    {isLocked && soldState === "pending" && (
-                      <p className="font-mono-geist text-[10px]" style={{ color: "#ef4444" }}>
-                        Time expired — no further bids accepted
-                      </p>
-                    )}
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-2">
+                {bidHistory.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-full text-center py-8">
+                    <span className="material-symbols-outlined text-on-surface-variant text-3xl mb-2">
+                      history
+                    </span>
+                    <p className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-widest">
+                      {isShuffling ? "Awaiting player reveal" : "No bids yet"}
+                    </p>
                   </div>
+                ) : (
+                  <table className="w-full text-left border-separate border-spacing-y-2">
+                    <thead className="sticky top-0 bg-surface-container-lowest/80 backdrop-blur-sm font-mono-geist text-[10px] text-on-surface-variant uppercase font-bold tracking-[0.1em]">
+                      <tr>
+                        <th className="px-6 py-4">Timeline</th>
+                        <th className="px-6 py-4">Franchise</th>
+                        <th className="px-6 py-4">Bid Amount</th>
+                        <th className="px-6 py-4 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono-geist text-xs">
+                      {bidHistory.map((b, i) => (
+                        <tr
+                          key={b.id}
+                          className="group hover:bg-white/5 transition-all text-on-surface-variant"
+                        >
+                          <td className="px-6 py-4 opacity-40">
+                            {new Date(b.placedAt).toLocaleTimeString("en-GB", { hour12: false })}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <span
+                                className="w-2 h-2 rounded-full shrink-0"
+                                style={{ background: b.teamColor || "#888" }}
+                              />
+                              <span className="font-archivo font-semibold">{b.teamName}</span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 font-archivo font-semibold text-amber-400">
+                            {fmtPts(b.amount)} pts
+                          </td>
+                          <td className="px-6 py-4 text-right opacity-40 italic font-inter text-[10px]">
+                            {i === 0 ? "Leading" : "Outbid"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 )}
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* Bid Log */}
-          <div className="flex-1 min-h-0 glass-panel rounded-2xl flex flex-col overflow-hidden bg-surface-container-lowest">
-            <div className="px-8 py-5 border-b border-white/10 flex justify-between items-center bg-white/5">
-              <h3 className="font-mono-geist text-xs text-on-surface uppercase flex items-center gap-3 font-bold tracking-[0.2em]">
-                <span className="material-symbols-outlined text-amber-400 text-lg">monitoring</span>
-                Live Bidding Feed
+          {/* ══════════ RIGHT: Teams ══════════ */}
+          <aside className="hidden lg:flex flex-col h-full bg-surface-container-low border-l border-outline-variant shrink-0 overflow-hidden">
+            <div className="px-8 py-4 border-b border-outline-variant">
+              <h3 className="font-mono-geist text-xs text-on-surface-variant uppercase font-bold tracking-[0.2em] mb-4">
+                Financial Dashboard
               </h3>
-              <div className="flex items-center gap-3">
-                <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-ping" />
-                <span className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-[0.12em] font-bold">
-                  Synchronized
-                </span>
-              </div>
-            </div>
-
-            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-2">
-              {bidHistory.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center py-8">
-                  <span className="material-symbols-outlined text-on-surface-variant text-3xl mb-2">
-                    history
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-4 glass-panel rounded-lg flex flex-col gap-1">
+                  <span className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-[0.1em]">
+                    Avg Purse
                   </span>
-                  <p className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-widest">
-                    {isShuffling ? "Awaiting player reveal" : "No bids yet"}
-                  </p>
+                  <span className="font-archivo text-lg font-bold text-on-surface leading-none">
+                    {fmtPts(avgPurse)}
+                    <span className="text-xs opacity-50 ml-1">pts</span>
+                  </span>
                 </div>
-              ) : (
-                <table className="w-full text-left border-separate border-spacing-y-2">
-                  <thead className="sticky top-0 bg-surface-container-lowest/80 backdrop-blur-sm font-mono-geist text-[10px] text-on-surface-variant uppercase font-bold tracking-[0.1em]">
-                    <tr>
-                      <th className="px-6 py-4">Timeline</th>
-                      <th className="px-6 py-4">Franchise</th>
-                      <th className="px-6 py-4">Bid Amount</th>
-                      <th className="px-6 py-4 text-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="font-mono-geist text-xs">
-                    {bidHistory.map((b, i) => (
-                      <tr
-                        key={b.id}
-                        className="group hover:bg-white/5 transition-all text-on-surface-variant"
-                      >
-                        <td className="px-6 py-4 opacity-40">
-                          {new Date(b.placedAt).toLocaleTimeString("en-GB", { hour12: false })}
-                        </td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <span
-                              className="w-2 h-2 rounded-full shrink-0"
-                              style={{ background: b.teamColor || "#888" }}
-                            />
-                            <span className="font-archivo font-semibold">{b.teamName}</span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 font-archivo font-semibold text-amber-400">
-                          {fmtPts(b.amount)} pts
-                        </td>
-                        <td className="px-6 py-4 text-right opacity-40 italic font-inter text-[10px]">
-                          {i === 0 ? "Leading" : "Outbid"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* ══════════ RIGHT: Teams ══════════ */}
-        <aside className="hidden lg:flex flex-col h-full bg-surface-container-low border-l border-outline-variant shrink-0 overflow-hidden">
-          <div className="px-8 py-4 border-b border-outline-variant">
-            <h3 className="font-mono-geist text-xs text-on-surface-variant uppercase font-bold tracking-[0.2em] mb-4">
-              Financial Dashboard
-            </h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 glass-panel rounded-lg flex flex-col gap-1">
-                <span className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-[0.1em]">
-                  Avg Purse
-                </span>
-                <span className="font-archivo text-lg font-bold text-on-surface leading-none">
-                  {fmtPts(avgPurse)}
-                  <span className="text-xs opacity-50 ml-1">pts</span>
-                </span>
-              </div>
-              <div className="p-4 glass-panel rounded-lg flex flex-col gap-1">
-                <span className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-[0.1em]">
-                  Slots Left
-                </span>
-                <span className="font-archivo text-lg font-bold text-on-surface leading-none">
-                  {totalSlotsLeft}
-                </span>
+                <div className="p-4 glass-panel rounded-lg flex flex-col gap-1">
+                  <span className="font-mono-geist text-[10px] text-on-surface-variant uppercase tracking-[0.1em]">
+                    Slots Left
+                  </span>
+                  <span className="font-archivo text-lg font-bold text-on-surface leading-none">
+                    {totalSlotsLeft}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
 
-          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-6 space-y-4">
-            {auction.teams.map((team) => {
-              const purse     = team.supabaseId ? teamPurses[team.supabaseId] : null;
-              const roster    = purse?.roster    ?? team.roster ?? 0;
-              const remaining = purse?.remaining ?? auction.rules.totalPoints;
-              const totalPoints = auction.rules.totalPoints;
-              const pctFilled = Math.round((remaining / Math.max(totalPoints, 1)) * 100);
-              const isFull    = roster >= auction.rules.teamSize;
+            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-6 space-y-4">
+              {auction.teams.map((team) => {
+                const purse       = team.supabaseId ? teamPurses[team.supabaseId] : null;
+                const roster      = purse?.roster    ?? team.roster ?? 0;
+                const remaining   = purse?.remaining ?? auction.rules.totalPoints;
+                const totalPoints = auction.rules.totalPoints;
+                const pctFilled   = Math.round((remaining / Math.max(totalPoints, 1)) * 100);
+                const isFull      = roster >= auction.rules.teamSize;
 
-              return (
-                <div
-                  key={team.supabaseId ?? team.id}
-                  className={`p-5 glass-panel rounded-xl transition-all relative overflow-hidden group ${
-                    isFull
-                      ? "opacity-50 grayscale cursor-not-allowed"
-                      : "hover:border-amber-400/40 cursor-pointer"
-                  }`}
-                >
-                  {isFull && <div className="absolute inset-0 bg-black/20 z-10" />}
-                  {isFull && (
-                    <div className="absolute top-2 right-2 z-20 bg-error-container text-on-error-container px-2 py-0.5 rounded font-mono-geist text-[8px] font-bold tracking-[0.12em] uppercase">
-                      Squad Full
-                    </div>
-                  )}
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="flex items-center gap-3">
-                      <div
-                        className="w-10 h-10 rounded-lg flex items-center justify-center font-bold shadow-lg text-sm font-archivo overflow-hidden"
-                        style={{ background: team.color || "#888", color: "#fff" }}
-                      >
-                        {team.logo ? (
-                          <img src={team.logo} alt={team.code} className="w-full h-full object-cover" />
-                        ) : (
-                          team.code.slice(0, 2)
-                        )}
+                return (
+                  <div
+                    key={team.supabaseId ?? team.id}
+                    className={`p-5 glass-panel rounded-xl transition-all relative overflow-hidden group ${
+                      isFull
+                        ? "opacity-50 grayscale cursor-not-allowed"
+                        : "hover:border-amber-400/40 cursor-pointer"
+                    }`}
+                  >
+                    {isFull && <div className="absolute inset-0 bg-black/20 z-10" />}
+                    {isFull && (
+                      <div className="absolute top-2 right-2 z-20 bg-error-container text-on-error-container px-2 py-0.5 rounded font-mono-geist text-[8px] font-bold tracking-[0.12em] uppercase">
+                        Squad Full
                       </div>
-                      <div>
-                        <span className="block font-archivo text-sm font-bold text-on-surface uppercase leading-tight">
-                          {team.name}
-                        </span>
-                        <span className="font-mono-geist text-[10px] text-on-surface-variant font-bold uppercase tracking-[0.1em]">
-                          Squad: {roster}/{auction.rules.teamSize}
-                        </span>
+                    )}
+                    <div className="flex justify-between items-start mb-4">
+                      <div className="flex items-center gap-3">
+                        <div
+                          className="w-10 h-10 rounded-lg flex items-center justify-center font-bold shadow-lg text-sm font-archivo overflow-hidden"
+                          style={{ background: team.color || "#888", color: "#fff" }}
+                        >
+                          {team.logo ? (
+                            <img src={team.logo} alt={team.code} className="w-full h-full object-cover" />
+                          ) : (
+                            team.code.slice(0, 2)
+                          )}
+                        </div>
+                        <div>
+                          <span className="block font-archivo text-sm font-bold text-on-surface uppercase leading-tight">
+                            {team.name}
+                          </span>
+                          <span className="font-mono-geist text-[10px] text-on-surface-variant font-bold uppercase tracking-[0.1em]">
+                            Squad: {roster}/{auction.rules.teamSize}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                    <span className="material-symbols-outlined text-on-surface-variant group-hover:text-amber-400 transition-colors">
-                      {isFull ? "lock" : "info"}
-                    </span>
-                  </div>
-                  <div className="space-y-3">
-                    <div className="flex justify-between font-mono-geist text-[10px] uppercase tracking-[0.1em] font-bold">
-                      <span className="text-on-surface-variant">Remaining Budget</span>
-                      <span className="font-archivo text-[13px] font-semibold text-on-surface">
-                        {fmtPts(remaining)} pts
+                      <span className="material-symbols-outlined text-on-surface-variant group-hover:text-amber-400 transition-colors">
+                        {isFull ? "lock" : "info"}
                       </span>
                     </div>
-                    <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                      <div
-                        className="h-full transition-all duration-1000"
-                        style={{
-                          width: `${pctFilled}%`,
-                          background: isFull ? "rgba(255,255,255,0.2)" : "linear-gradient(90deg,#C9920A,#F5B400)",
-                        }}
-                      />
+                    <div className="space-y-3">
+                      <div className="flex justify-between font-mono-geist text-[10px] uppercase tracking-[0.1em] font-bold">
+                        <span className="text-on-surface-variant">Remaining Budget</span>
+                        <span className="font-archivo text-[13px] font-semibold text-on-surface">
+                          {fmtPts(remaining)} pts
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                        <div
+                          className="h-full transition-all duration-1000"
+                          style={{
+                            width: `${pctFilled}%`,
+                            background: isFull ? "rgba(255,255,255,0.2)" : "linear-gradient(90deg,#C9920A,#F5B400)",
+                          }}
+                        />
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        </aside>
-      </main>
-    </div>
+                );
+              })}
+            </div>
+          </aside>
+        </main>
+
+        {/* Feedback Modal */}
+        {showFeedback && (
+          <FeedbackModal
+            auctionId={auctionId}
+            role="auctioneer"
+            trigger={feedbackTrigger}
+            onClose={() => setShowFeedback(false)}
+          />
+        )}
+      </div>
+    </AuctionStatusGate>
   );
 }
 
