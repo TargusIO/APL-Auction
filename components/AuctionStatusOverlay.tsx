@@ -204,7 +204,7 @@ export function CompletedContent({ stats }: { stats?: AuctionStats }) {
         </div>
 
         {/* RIGHT — top buys + team spend summary */}
-        <div className="w-full sm:w-[300px] shrink-0 flex flex-col gap-3 py-6 px-4 sm:pr-6 sm:pl-2 overflow-y-auto"> 
+        <div className="w-full sm:w-[300px] shrink-0 flex flex-col gap-3 py-6 px-4 sm:pr-6 sm:pl-2 overflow-y-auto scrollbar-hide"> 
 
           {stats && stats.topBuys.length > 0 && (
             <div className="aso-glass rounded-2xl border border-white/[0.07] p-5 shrink-0">

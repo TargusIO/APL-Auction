@@ -3,6 +3,7 @@
 import { useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import type { Player, Team } from "@/types/auction";
+import ImageUploadField from "@/components/Admin/ImageUploadField";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Role = "Batsman" | "Bowler" | "All-rounder" | "Wicket Keeper";
@@ -12,6 +13,7 @@ interface PlayersTabProps {
   locked: boolean;
   players: Player[];
   teams: Team[];
+  auctionId: string; // needed so uploaded photos land in {auctionId}/Auction-Images/player-images/
   onAddPlayer: (data: Omit<Player, "id" | "supabaseId">) => Promise<void>;
   onEditPlayer: (id: number, data: Omit<Player, "id" | "supabaseId">) => Promise<void>;
   onDeletePlayer: (id: number) => Promise<void>;
@@ -52,10 +54,11 @@ function LockBanner() {
 
 // ── Add / Edit Player Modal ───────────────────────────────────────────────────
 function PlayerModal({
-  teams, initial, onClose, onSave,
+  teams, initial, auctionId, onClose, onSave,
 }: {
   teams: Team[];
   initial?: Player;
+  auctionId: string;
   onClose: () => void;
   onSave: (p: Omit<Player, "id" | "supabaseId">) => Promise<void>;
 }) {
@@ -214,13 +217,19 @@ function PlayerModal({
           <Toggle checked={form.capped} onChange={(v) => set("capped", v)} />
         </div>
 
-        {/* Photo URL — optional with note */}
+        {/* ── PLAYER PHOTO — now an upload field instead of a raw URL input.
+             Uploads go to {auctionId}/Auction-Images/player-images/ via
+             /api/uploads, and the resulting public URL is stored on
+             form.img exactly as before, so the rest of the save flow
+             (onSave → players.img) is unchanged. ── */}
         <div>
-          <FieldLabel>Photo URL <span style={{ color: "var(--color-outline)", textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>(optional)</span></FieldLabel>
-          <input type="text" value={form.img} onChange={(e) => set("img", e.target.value)}
-            placeholder="https://..."
-            className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-            style={inputStyle} onFocus={focusOn} onBlur={focusOff} />
+          <ImageUploadField
+            auctionId={auctionId}
+            kind="player"
+            value={form.img}
+            onChange={(url) => set("img", url)}
+            label="Player Photo (optional)"
+          />
           {!form.img && (
             <p className="mt-1.5 text-[10px] flex items-center gap-1" style={{ color: "var(--color-warning)" }}>
               <span className="material-symbols-outlined" style={{ fontSize: "11px" }}>warning</span>
@@ -378,7 +387,7 @@ function PlayerCard({
 }
 
 // ── Main Tab ──────────────────────────────────────────────────────────────────
-export default function PlayersTab({ locked, players, teams, onAddPlayer, onEditPlayer, onDeletePlayer }: PlayersTabProps) {
+export default function PlayersTab({ locked, players, teams, auctionId, onAddPlayer, onEditPlayer, onDeletePlayer }: PlayersTabProps) {
   const [filter, setFilter]       = useState<Filter>("All");
   const [modal, setModal] = useState<null | { mode: "add" } | { mode: "edit"; player: Player }>(null);
   const [poolLocked, setPoolLocked] = useState(false);
@@ -411,10 +420,10 @@ export default function PlayersTab({ locked, players, teams, onAddPlayer, onEdit
   return (
     <>
       {modal?.mode === "add" && !isEditingBlocked && (
-        <PlayerModal teams={teams} onClose={() => setModal(null)} onSave={handleAdd} />
+        <PlayerModal teams={teams} auctionId={auctionId} onClose={() => setModal(null)} onSave={handleAdd} />
       )}
       {modal?.mode === "edit" && !isEditingBlocked && (
-        <PlayerModal teams={teams} initial={modal.player} onClose={() => setModal(null)} onSave={handleEdit} />
+        <PlayerModal teams={teams} auctionId={auctionId} initial={modal.player} onClose={() => setModal(null)} onSave={handleEdit} />
       )}
 
       <div className="flex flex-col lg:flex-row gap-8">

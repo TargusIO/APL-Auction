@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import type { Team } from "@/types/auction";
+import ImageUploadField from "@/components/Admin/ImageUploadField";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const TOOLS = [
@@ -23,6 +24,7 @@ const EMPTY_FORM: Omit<Team, "id" | "roster" | "supabaseId"> = {
 interface TeamsTabProps {
   locked: boolean;
   teams: Team[];
+  auctionId: string; // needed so uploaded logos land in {auctionId}/Auction-Images/team-images/
   onAddTeam: (data: Omit<Team, "id" | "roster" | "supabaseId">) => Promise<void>;
   onEditTeam: (id: number, data: Omit<Team, "id" | "roster" | "supabaseId">) => Promise<void>;
   onDeleteTeam: (id: number) => Promise<void>;
@@ -141,11 +143,12 @@ function PinInput({
 interface FranchiseModalProps {
   initial?: Team;
   existingCodes: string[];
+  auctionId: string;
   onClose: () => void;
   onSave: (data: Omit<Team, "id" | "roster" | "supabaseId">) => void;
 }
 
-function FranchiseModal({ initial, existingCodes, onClose, onSave }: FranchiseModalProps) {
+function FranchiseModal({ initial, existingCodes, auctionId, onClose, onSave }: FranchiseModalProps) {
   const isEdit = !!initial;
   const [form, setForm] = useState<Omit<Team, "id" | "roster" | "supabaseId">>(
     initial
@@ -248,12 +251,21 @@ function FranchiseModal({ initial, existingCodes, onClose, onSave }: FranchiseMo
               <span className="text-xs font-mono" style={{ color: "var(--color-on-surface-variant)" }}>{form.color.toUpperCase()}</span>
             </div>
           </div>
+
+          {/* ── TEAM LOGO — now an upload field instead of a raw URL input.
+               Uploads go to {auctionId}/Auction-Images/team-images/ via
+               /api/uploads, and the resulting public URL is stored on
+               form.logo exactly as before, so the rest of the save flow
+               (onSave → teams.logo) is unchanged. ── */}
           <div>
-            <FieldLabel>Logo URL</FieldLabel>
-            <input type="text" value={form.logo} onChange={(e) => set("logo", e.target.value)}
-              placeholder="https://..."
-              className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-              style={inputBase()} onFocus={focusOn} onBlur={focusOff} />
+            <ImageUploadField
+              auctionId={auctionId}
+              kind="team"
+              value={form.logo}
+              onChange={(url) => set("logo", url)}
+              label="Team Logo"
+              accentColor={form.color}
+            />
           </div>
 
           {/* ── PIN FIELD ── */}
@@ -466,8 +478,8 @@ function TeamCard({
           <div className="flex items-center gap-1.5">
             {hasPIN ? (
               <>
-                <span className="material-symbols-outlined" style={{ fontSize: "12px", color: "var(--color-success)" }}>lock</span>
-                <span className="text-[10px]" style={{ fontFamily: "var(--font-label-mono)", color: "var(--color-success)" }}>
+                <span className="material-symbols-outlined" style={{ fontSize: "12px", color: "var(--color-success-green)" }}>lock</span>
+                <span className="text-[10px]" style={{ fontFamily: "var(--font-label-mono)", color: "var(--color-success-green)" }}>
                   {"•".repeat(team.pin!.length)}
                 </span>
               </>
@@ -485,7 +497,7 @@ function TeamCard({
 }
 
 // ── Main Tab ──────────────────────────────────────────────────────────────────
-export default function TeamsTab({ locked, teams, onAddTeam, onEditTeam, onDeleteTeam }: TeamsTabProps) {
+export default function TeamsTab({ locked, teams, auctionId, onAddTeam, onEditTeam, onDeleteTeam }: TeamsTabProps) {
   const [activeTeamId, setActiveTeamId] = useState<number | null>(teams[0]?.id ?? null);
   const [modal, setModal] = useState<null | { mode: "add" } | { mode: "edit"; team: Team }>(null);
   const [deleteTarget, setDeleteTarget] = useState<Team | null>(null);
@@ -537,10 +549,10 @@ export default function TeamsTab({ locked, teams, onAddTeam, onEditTeam, onDelet
   return (
     <>
       {modal?.mode === "add" && (
-        <FranchiseModal existingCodes={existingCodes()} onClose={() => setModal(null)} onSave={handleAdd} />
+        <FranchiseModal existingCodes={existingCodes()} auctionId={auctionId} onClose={() => setModal(null)} onSave={handleAdd} />
       )}
       {modal?.mode === "edit" && (
-        <FranchiseModal initial={modal.team} existingCodes={existingCodes(modal.team.id)} onClose={() => setModal(null)} onSave={handleEdit} />
+        <FranchiseModal initial={modal.team} existingCodes={existingCodes(modal.team.id)} auctionId={auctionId} onClose={() => setModal(null)} onSave={handleEdit} />
       )}
       {deleteTarget && (
         <DeleteConfirm team={deleteTarget} onConfirm={() => handleDelete(deleteTarget)} onCancel={() => setDeleteTarget(null)} />
@@ -683,8 +695,8 @@ export default function TeamsTab({ locked, teams, onAddTeam, onEditTeam, onDelet
                     </div>
                     {team.pin ? (
                       <div className="flex items-center gap-1">
-                        <span className="material-symbols-outlined" style={{ fontSize: "12px", color: "var(--color-success)" }}>check_circle</span>
-                        <span className="text-[9px] font-black uppercase" style={{ fontFamily: "var(--font-label-mono)", color: "var(--color-success)" }}>Set</span>
+                        <span className="material-symbols-outlined" style={{ fontSize: "12px", color: "var(--color-success-green)" }}>check_circle</span>
+                        <span className="text-[9px] font-black uppercase" style={{ fontFamily: "var(--font-label-mono)", color: "var(--color-success-green)" }}>Set</span>
                       </div>
                     ) : (
                       <button onClick={() => setModal({ mode: "edit", team })}

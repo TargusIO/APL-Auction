@@ -11,7 +11,7 @@ const STATUS_META = {
   setup:     { label: "SETUP MODE", color: "var(--color-outline)",       pulse: false },
   live:      { label: "LIVE",       color: "var(--color-theme-orange)",  pulse: true  },
   paused:    { label: "PAUSED",     color: "var(--color-warning)",       pulse: false },
-  completed: { label: "COMPLETED",  color: "var(--color-error)",         pulse: false },
+  completed: { label: "COMPLETED",  color: "var(--color-success-green)", pulse: false },
 } as const;
 
 // ── Confirmation copy for each control action ──────────────────────────────────
